@@ -244,7 +244,9 @@ npm run icon         # scripts/icon-source.png → icon.png
 npm run pack         # → dist/dsh-formula-editor-1.0.0.tgz
 ```
 
-仓库**没有 npm 依赖**（`dependencies` 与 `devDependencies` 都是空的），`npm install` 只用于在本地生成 `package-lock.json`，可以跳过。`client.js` 已内联全部转换模块，`assets/` 与 `vendor/` 都在仓库里，所以构建和运行都不需要联网。
+仓库**没有 npm 依赖**（`dependencies` 与 `devDependencies` 都是空的），所以**不需要 `npm install`**。`client.js` 已内联全部转换模块，`assets/` 与 `vendor/` 都在仓库里，构建和运行都不联网。
+
+`client.js` 是构建产物，但它**也提交进仓库**：这样 `install_bundle` 装完就能直接用，别人不必先装 Node 再构建。
 
 重新生成 MathLive 资产（只有升级 MathLive 时才需要）：
 
@@ -298,6 +300,7 @@ dsh-formula-editor/
 ├── icon.png                 插件图标（512×512 透明底，80 KB）
 ├── screenshot.png           README 截图
 ├── LICENSE                  MIT
+├── .gitattributes           统一 LF，二进制文件不参与换行转换
 ├── locale/{zh,en}.json      名称与描述
 ├── src/
 │   ├── convert.js           纯函数转换：MathML / OMML / AsciiMath / docx / ZIP / CRC32
@@ -314,6 +317,8 @@ dsh-formula-editor/
     └── browser/             浏览器端测试：静态服务器 + 自测页 + 驱动脚本 + React
 ```
 
+仓库共 67 个文件、约 2.4 MB，其中 1.6 MB 是内联的引擎与字体——这是刻意的：插件运行时**不联网、不装依赖**。
+
 ---
 
 ## 已知限制 · Known limitations
@@ -322,7 +327,7 @@ dsh-formula-editor/
 - **OCR 依赖外部视觉模型 API**，需要网络与有效 Key。
 - **公式域内输入会触发 MathLive 的 inlineShortcuts**：打 `alpha` 会自动变 α、`sqrt` 变根号。这是 MathLive 的默认行为，想关掉可以设 `MathfieldElement.inlineShortcuts = {}`。
 - **Word 2007 以前的版本**不支持 MathML → OMath 转换。
-- **左侧入口的位次是 `order: 40`**，排在「技能中心」之后。要让位次变化，改 `src/client-ui.js` 里注册 `sidebar.panellist` 时的 `order` 再 `npm run build`。默认 profile 里已占用的位次：`plugins`(0)、`dsh-market`(1)、`archived-sessions`(4)、`schedules`(10)、`task-board`(20)、`skill-explorer`(30)。
+- **左侧入口的位次是 `order: 40`**，排在「技能中心」之后。要让位次变化，改 `src/client-ui.js` 里注册 `sidebar.panellist` 时的 `order` 再 `npm run build`。本机 profile 里已被占用的位次：`plugins`(0)、`dsh-market`(1)、`archived-sessions`(4)、`schedules`(10)、`skill-explorer`(30)。
 - **插件列表图标有 256 KiB 上限**：超了 DSH 会把整个元数据读取判为失败，图标消失并在该行下面显示红色诊断。`npm run icon` 会断言这个预算。
 
 ---
