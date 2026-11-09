@@ -1,0 +1,82 @@
+{
+  "name": "dsh-formula-editor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A formula editor plugin for DeepSeek Harness: image-to-LaTeX OCR, a Word-style symbol palette, an editable MathLive formula field, and one-click copy as a Word-native equation or export to .docx.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "latex",
+    "omml",
+    "mathlive",
+    "katex",
+    "ocr",
+    "docx"
+  ],
+  "homepage": "https://github.com/YaoZhang0224/dsh-formula-editor#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YaoZhang0224/dsh-formula-editor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YaoZhang0224/dsh-formula-editor/issues"
+  },
+  "author": "YaoZhang0224",
+  "license": "MIT",
+  "icon": "icon.png",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.png"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.png",
+    "assets/katex/katex.min.css",
+    "assets/katex/katex.min.js",
+    "assets/katex/fonts/*.woff2",
+    "assets/mathlive/*",
+    "assets/vendor/*.js",
+    "vendor/LICENSE-katex",
+    "vendor/LICENSE-mathlive",
+    "vendor/LICENSE-temml",
+    "vendor/LICENSE-mathml2omml",
+    "vendor/LICENSE-tex2typst",
+    "README.md",
+    "LICENSE",
+    "screenshot.png"
+  ],
+  "engines": {
+    "dsh": ">=0.2.0-rc.1"
+  },
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "check": "node scripts/check-css.mjs",
+    "icon": "node scripts/make-icon.mjs",
+    "test": "node scripts/test-convert.mjs && node scripts/test-symbols.mjs && node scripts/test-host.mjs && node scripts/test-relocate.mjs",
+    "test:browser": "node test/browser/run.mjs",
+    "test:all": "node scripts/check-css.mjs && node scripts/build-client.mjs && node scripts/test-convert.mjs && node scripts/test-symbols.mjs && node scripts/test-host.mjs && node scripts/test-relocate.mjs && node test/browser/run.mjs",
+    "verify": "node scripts/verify-install.mjs",
+    "pack": "node scripts/pack.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-formula-editor harness</title>
+<style>
+  :root {
+    --dsw-alias-bg-base: #1b1b22;
+    --dsw-alias-bg-layer-1: #23232c;
+    --dsw-alias-bg-layer-2: #2b2b36;
+    --dsw-alias-bg-overlay: #30303c;
+    --dsw-alias-border-l1: #3a3a46;
+    --dsw-alias-border-l2: #4a4a58;
+    --dsw-alias-brand-primary: #4d6bfe;
+    --dsw-alias-label-primary: #ececf1;
+    --dsw-alias-label-secondary: #a0a0ad;
+    --dsw-alias-state-error-primary: #f2555a;
+    --dsw-alias-state-success-primary: #4ec9a0;
+  }
+  html, body { margin: 0; height: 100%; background: var(--dsw-alias-bg-base); }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+  /* The real sidebar column is ~360px wide; the harness pins that so layout bugs show. */
+  #root { width: 372px; height: 100%; box-sizing: border-box; border-right: 1px solid var(--dsw-alias-border-l1); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script>
+/* The DSH module loader: capture the plugin a bundle registers, hand it React. */
+window.__ModuleLoader__ = {
+  captured: null,
+  load(definition) {
+    window.__ModuleLoader__.captured = definition
+  },
+  require(name) {
+    if (name === 'react') return window.React
+    throw new Error('harness has no module ' + name)
+  },
+}
+</script>
+<script src="/plugins/dsh-formula-editor/client.js"></script>
+<script>
+const { captured } = window.__ModuleLoader__
+if (captured === null) throw new Error('client.js did not call __ModuleLoader__.load')
+
+const harness = { log: [], requests: [], slotInjections: [] }
+
+/* A clipboard the harness can read back: the real one needs focus and permission. */
+const clipboard = { text: null, html: null, plain: null, writes: [] }
+Object.defineProperty(navigator, 'clipboard', {
+  configurable: true,
+  value: {
+    async writeText(text) { clipboard.text = text; clipboard.writes.push({ kind: 'text', text }); },
+    async write(items) {
+      for (const item of items) {
+        for (const type of item.types) {
+          const blob = await item.getType(type)
+          const body = await blob.text()
+          if (type === 'text/html') clipboard.html = body
+          if (type === 'text/plain') clipboard.plain = body
+          clipboard.writes.push({ kind: 'rich', type, body })
+        }
+      }
+    },
+  },
+})
+
+/* The host half is exercised separately; here it answers with canned payloads. */
+const canned = { ocr: null, settings: { configured: true, ownConfigured: true, source: 'file', ref: 'FORMULA_OCR_API_KEY', usingRef: 'FORMULA_OCR_API_KEY', baseURL: 'https://agi.tongji.edu.cn/v1', model: 'Qwen3.8-Flash-Next', writable: true } }
+const realFetch = window.fetch.bind(window)
+window.fetch = async (url, options) => {
+  const path = String(url)
+  harness.requests.push({ path, method: options?.method ?? 'GET' })
+  if (path.endsWith('/ocr')) {
+    const answer = canned.ocr ?? '\\frac{a+b}{c-d}'
+    return new Response(JSON.stringify({ latex: answer }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  if (path.endsWith('/settings')) {
+    if (options?.method === 'POST') return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    return new Response(JSON.stringify(canned.settings), { status: 200 })
+  }
+  return realFetch(url, options)
+}
+
+/* Capture the descriptor the plugin registers, then mount the tab by hand. */
+let descriptor = null
+let settingsRender = null
+const slotEntries = []
+const slots = {
+  inject(key, callback) {
+    harness.slotInjections.push(key)
+    return callback()
+  },
+  register(options, component) {
+    slotEntries.push({ options, component })
+    return () => {}
+  },
+  entriesOfSlot(key) {
+    return slotEntries.filter((one) => one.options.name === key)
+  },
+}
+let selectedPanel = null
+const layout = {
+  selectPanel(id) { selectedPanel = id },
+  panelInfo: { getSnapshot: () => ({ activePanelId: selectedPanel }) },
+}
+const ctx = {
+  get(name) {
+    if (name === 'betterSidebar') {
+      return {
+        registerTab(one) { descriptor = one; settingsRender = one.settings?.render ?? null; return () => {} },
+      }
+    }
+    if (name === 'slots') return slots
+    if (name === 'layout') return layout
+    return undefined
+  },
+  inject(names, callback) {
+    const scoped = {}
+    for (const name of names) scoped[name] = ctx.get(name)
+    return callback(scoped)
+  },
+  slots,
+  effect(callback) { const off = callback(); return typeof off === 'function' ? off : () => {} },
+  on() { return () => {} },
+  provide() { return () => {} },
+}
+
+const plugin = captured.factory(window.__ModuleLoader__.require)
+harness.plugin = plugin
+plugin.apply(ctx)
+
+if (descriptor === null) throw new Error('the plugin registered no tab')
+
+const props = {
+  ctx,
+  store: {},
+  scope: { sessionId: 'harness' },
+  tab: { id: 'harness', type: descriptor.id, title: '公式编辑器' },
+  visible: true,
+}
+harness.descriptor = descriptor
+harness.settingsRender = settingsRender
+harness.props = props
+harness.clipboard = clipboard
+harness.slotEntries = slotEntries
+harness.slots = slots
+harness.layout = layout
+harness.selectedPanel = () => selectedPanel
+
+/* Setting a controlled textarea from script needs the native setter.
+   Scoped to #root: the harness also mounts the main-page editor elsewhere. */
+harness.type = (text) => {
+  const area = document.querySelector('#root .dsffe-input')
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+  setter.call(area, text)
+  area.dispatchEvent(new Event('input', { bubbles: true }))
+}
+harness.labels = () => [...document.querySelectorAll('#root .dsffe-menu .dsffe-item')].map((one) => one.textContent)
+harness.openMenu = (index) => {
+  const carets = [...document.querySelectorAll('#root .dsffe-caret')]
+  carets[index].click()
+}
+harness.pressPrimary = (index) => {
+  const mains = [...document.querySelectorAll('#root .dsffe-main')]
+  mains[index].click()
+}
+harness.categories = () => [...document.querySelectorAll('#root .dsffe-cat')]
+harness.openCategory = (index) => { harness.categories()[index].click() }
+harness.openCategoryById = (id) => {
+  const one = document.querySelector(`#root .dsffe-cat[data-group="${id}"]`)
+  if (one === null) throw new Error(`no category ${id}`)
+  one.click()
+}
+harness.categoryItems = (id) => [...document.querySelectorAll(`#root .dsffe-cat-menu[data-menu="${id}"] .dsffe-sym`)]
+harness.openStyleMenu = () => {
+  const one = document.querySelector('#root .dsffe-tool-split .dsffe-tool')
+  if (one === null) throw new Error('no style button')
+  one.click()
+}
+harness.styleItems = () => [...document.querySelectorAll('#root .dsffe-tool-menu .dsffe-item')]
+harness.tool = (name) => document.querySelector(`#root .dsffe-tool[data-tool="${name}"]`)
+harness.selectRange = (start, end) => {
+  const area = document.querySelector('#root .dsffe-input')
+  area.focus()
+  area.setSelectionRange(start, end)
+  area.dispatchEvent(new Event('select', { bubbles: true }))
+}
+harness.caret = () => {
+  const area = document.querySelector('#root .dsffe-input')
+  return { start: area.selectionStart, end: area.selectionEnd }
+}
+/* The editable formula surface: MathLive upgrades <math-field> in place. */
+harness.field = () => document.querySelector('#root .dsffe-mathfield')
+harness.fieldValue = () => {
+  const one = harness.field()
+  return one === null ? null : one.value
+}
+harness.fieldType = (text) => {
+  const one = harness.field()
+  if (one === null) throw new Error('no math-field')
+  one.focus()
+  one.insert(text)
+}
+harness.fieldClear = () => {
+  const one = harness.field()
+  if (one === null) return
+  one.value = ''
+  one.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+window.ReactDOM.createRoot(document.getElementById('root')).render(
+  React.createElement(descriptor.component, props),
+)
+harness.mounted = true
+harness.canned = canned
+window.harness = harness
+
+if (new URLSearchParams(location.search).get('selftest') === '1') {
+  const tag = document.createElement('script')
+  tag.src = 'selftest.js'
+  document.body.appendChild(tag)
+}
+</script>
+</body>
+</html>

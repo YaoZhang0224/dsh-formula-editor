@@ -1,0 +1,273 @@
+/**
+ * Host-half smoke test: mount index.js against a fake context and exercise every
+ * route the browser page will call. No DSH process involved.
+ *
+ * Run: node scripts/test-host.mjs
+ */
+
+import { strict as assert } from 'node:assert'
+import { createRequire } from 'node:module'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const require = createRequire(import.meta.url)
+const plugin = await import('../index.js')
+
+/* The sample screenshot ships in test/fixtures so the live OCR check works from
+ * a fresh clone; OCR_SAMPLE_IMAGE overrides it. */
+const HERE = dirname(fileURLToPath(import.meta.url))
+const SAMPLE_IMAGE = process.env.OCR_SAMPLE_IMAGE !== undefined && process.env.OCR_SAMPLE_IMAGE.length > 0
+  ? process.env.OCR_SAMPLE_IMAGE
+  : [join(HERE, '..', 'test', 'fixtures', 'formula.png')].find((candidate) => existsSync(candidate))
+
+assert.equal(plugin.name, 'dsh-formula-editor')
+assert.deepEqual(plugin.inject, ['webServer'])
+
+/* ---------------------------------------------------------------- fakes */
+
+const routes = new Map()
+
+const ctx = {
+  effect(callback, label) {
+    const dispose = callback()
+    return typeof dispose === 'function' ? dispose : () => {}
+  },
+  webServer: {
+    register(route) {
+      const key = `${route.kind} ${route.path}`
+      if (routes.has(key)) throw new Error(`duplicate ${key}`)
+      routes.set(key, route)
+      return () => { routes.delete(key) }
+    },
+  },
+  get(name) {
+    return name === 'credentials' ? credentials : undefined
+  },
+  logger: { warn() {} },
+}
+
+const secrets = new Map()
+const credentials = {
+  async resolve(ref) {
+    const value = secrets.get(ref)
+    return value === undefined ? undefined : { value, source: 'file' }
+  },
+  async describe(ref) {
+    return { configured: secrets.has(ref), writable: true }
+  },
+  async set(ref, value) {
+    if (typeof value !== 'string' || value.length === 0) throw new Error('empty')
+    secrets.set(ref, value)
+  },
+  async unset(ref) {
+    secrets.delete(ref)
+  },
+}
+
+/** One request/response round trip against a registered route. */
+function call(kind, path, { method = 'GET', body, headers = {}, url } = {}) {
+  const route = routes.get(`${kind} ${path}`)
+  assert.ok(route !== undefined, `route ${kind} ${path} is not registered`)
+  return new Promise((accept) => {
+    const chunks = []
+    const req = {
+      method,
+      url: url ?? path,
+      headers: { host: '127.0.0.1:55678', ...headers },
+      on(event, listener) {
+        if (event === 'data' && body !== undefined) listener(Buffer.from(body, 'utf8'))
+        if (event === 'end') listener()
+      },
+      destroy() {},
+    }
+    const res = {
+      status: 0,
+      headers: {},
+      body: '',
+      headersSent: false,
+      writeHead(status, extra) {
+        this.status = status
+        this.headers = extra ?? {}
+        this.headersSent = true
+      },
+      end(chunk) {
+        if (chunk !== undefined) {
+          this.body += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)
+        }
+        accept(this)
+      },
+    }
+    route.handler(req, res)
+  })
+}
+
+/* ---------------------------------------------------------------- mount */
+
+plugin.apply(ctx, {})
+
+assert.deepEqual(
+  [...routes.keys()].sort(),
+  [
+    'exact /plugins/dsh-formula-editor/ocr',
+    'exact /plugins/dsh-formula-editor/settings',
+    'prefix /plugins/dsh-formula-editor/assets',
+  ],
+)
+console.log('routes registered: 3')
+
+/* ---------------------------------------------------------------- assets */
+
+const ASSET_ROUTE = '/plugins/dsh-formula-editor/assets'
+
+/** Request one asset path; the route key stays fixed, only the URL varies. */
+const asset = (url, options = {}) =>
+  call('prefix', ASSET_ROUTE, { ...options, url: `${ASSET_ROUTE}${url}` })
+
+const css = await asset('/katex/katex.min.css')
+assert.equal(css.status, 200)
+assert.match(css.headers['content-type'], /text\/css/)
+assert.ok(css.body.includes('.katex'))
+
+const font = await asset('/katex/fonts/KaTeX_Main-Regular.woff2')
+assert.equal(font.status, 200)
+assert.equal(font.headers['content-type'], 'font/woff2')
+
+for (const name of ['temml.min.js', 'mathml2omml.js', 'tex2typst.min.js']) {
+  const hit = await asset(`/vendor/${name}`)
+  assert.equal(hit.status, 200, `${name} is served`)
+  assert.match(hit.headers['content-type'], /javascript/)
+}
+
+/* Encoded dots survive URL normalization, so this really reaches the traversal guard. */
+const traversal = await asset('/%2e%2e/%2e%2e/package.json')
+assert.ok(traversal.status === 403 || traversal.status === 404, `traversal refused (${traversal.status})`)
+
+const missing = await asset('/nope.css')
+assert.equal(missing.status, 404)
+
+const wrongMethod = await asset('/katex/katex.min.css', { method: 'POST' })
+assert.equal(wrongMethod.status, 405)
+console.log('assets route: css, fonts, vendor js, traversal, 404, 405 all correct')
+
+/* -------------------------------------------------------------- settings */
+
+const empty = await call('exact', '/plugins/dsh-formula-editor/settings')
+assert.equal(empty.status, 200)
+let state = JSON.parse(empty.body)
+assert.equal(state.configured, false)
+assert.equal(state.ownConfigured, false)
+assert.equal(state.writable, true)
+assert.deepEqual(state.fallbackRefs, ['TONGJI_AI_API_KEY', 'DEEPSEEK_API_KEY'])
+assert.equal(state.model, 'Qwen3.8-Flash-Next')
+console.log('settings GET (empty):', JSON.stringify(state))
+
+const saved = await call('exact', '/plugins/dsh-formula-editor/settings', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ apiKey: 'sk-test-1234' }),
+})
+assert.equal(saved.status, 200)
+assert.equal(secrets.get('FORMULA_OCR_API_KEY'), 'sk-test-1234')
+
+state = JSON.parse((await call('exact', '/plugins/dsh-formula-editor/settings')).body)
+assert.equal(state.configured, true)
+assert.equal(state.ownConfigured, true)
+assert.equal(state.usingRef, 'FORMULA_OCR_API_KEY')
+console.log('settings POST then GET:', state.source, state.usingRef)
+
+const blank = await call('exact', '/plugins/dsh-formula-editor/settings', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ apiKey: '   ' }),
+})
+assert.equal(blank.status, 400)
+
+const cleared = await call('exact', '/plugins/dsh-formula-editor/settings', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ clear: true }),
+})
+assert.equal(cleared.status, 200)
+assert.equal(secrets.has('FORMULA_OCR_API_KEY'), false)
+
+/* Fallback: the profile's own vision key answers when the plugin has none. */
+secrets.set('TONGJI_AI_API_KEY', 'sk-profile')
+state = JSON.parse((await call('exact', '/plugins/dsh-formula-editor/settings')).body)
+assert.equal(state.configured, true)
+assert.equal(state.ownConfigured, false)
+assert.equal(state.usingRef, 'TONGJI_AI_API_KEY')
+secrets.delete('TONGJI_AI_API_KEY')
+console.log('settings: save, blank refusal, clear, fallback all correct')
+
+/* ------------------------------------------------------------------- ocr */
+
+const notPost = await call('exact', '/plugins/dsh-formula-editor/ocr', { method: 'GET' })
+assert.equal(notPost.status, 405)
+
+const notJson = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+  method: 'POST',
+  headers: { 'content-type': 'text/plain' },
+  body: '{}',
+})
+assert.equal(notJson.status, 415)
+
+const crossOrigin = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', origin: 'https://evil.example' },
+  body: '{}',
+})
+assert.equal(crossOrigin.status, 403)
+
+const noImage = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({}),
+})
+assert.equal(noImage.status, 400)
+assert.equal(JSON.parse(noImage.body).error, 'invalid-image')
+
+const noKey = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ image: 'data:image/png;base64,AAAA' }),
+})
+assert.equal(noKey.status, 400)
+assert.equal(JSON.parse(noKey.body).error, 'api-key-missing')
+console.log('ocr route: 405, 415, 403, invalid-image, api-key-missing all correct')
+
+/* A live round trip only when a key is really configured on this machine.
+ * OCR_API_KEY lets CI (or anyone without a DSH profile) opt in explicitly. */
+const yaml = (() => {
+  if (typeof process.env.OCR_API_KEY === 'string' && process.env.OCR_API_KEY.length > 0) return ''
+  try {
+    return readFileSync(join(homedir(), '.dsh', '.credentials.yaml'), 'utf8')
+  } catch {
+    return ''
+  }
+})()
+const liveKey = process.env.OCR_API_KEY ?? /TONGJI_AI_API_KEY:\s*(\S+)/.exec(yaml)?.[1]
+
+if (liveKey === undefined) {
+  console.log('ocr live call: skipped (no profile vision key)')
+} else if (SAMPLE_IMAGE === undefined) {
+  console.log('ocr live call: skipped (sample image not found beside the workspace)')
+} else {
+  secrets.set('TONGJI_AI_API_KEY', liveKey)
+  const png = readFileSync(SAMPLE_IMAGE).toString('base64')
+  const started = Date.now()
+  const live = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ image: `data:image/png;base64,${png}` }),
+  })
+  const elapsed = Date.now() - started
+  assert.equal(live.status, 200, `live OCR answered ${live.status}: ${live.body.slice(0, 300)}`)
+  const answer = JSON.parse(live.body)
+  assert.ok(typeof answer.latex === 'string' && answer.latex.length > 0, 'live OCR returned LaTeX')
+  assert.ok(!/\$\$|```/.test(answer.latex), 'live OCR answer carries no delimiters')
+  console.log(`ocr live call: ${elapsed}ms -> ${answer.latex}`)
+}
+
+console.log('\nHOST OK')

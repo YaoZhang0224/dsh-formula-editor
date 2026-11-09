@@ -1,0 +1,4 @@
+{
+  "name": "Formula Editor",
+  "description": "Recognize a formula image into LaTeX, preview it live, and copy it as a Word-native equation or export it to .docx."
+}
