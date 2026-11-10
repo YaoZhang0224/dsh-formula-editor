@@ -319,6 +319,7 @@ dsh-formula-editor/
 ├── cordis.patch.yml         bundle patch（insert 一条 id: dsh-formula-editor）
 ├── icon.png                 插件图标（512×512 透明底，80 KB）
 ├── screenshot.png           README 截图
+├── screenshots.json         插件市场详情页的截图清单
 ├── LICENSE                  MIT
 ├── .gitattributes           统一 LF，二进制文件不参与换行转换
 ├── locale/{zh,en}.json      名称与描述
@@ -337,7 +338,7 @@ dsh-formula-editor/
     └── browser/             浏览器端测试：静态服务器 + 自测页 + 驱动脚本 + React
 ```
 
-仓库共 67 个文件、约 2.4 MB，其中 1.6 MB 是内联的引擎与字体——这是刻意的：插件运行时**不联网、不装依赖**。
+仓库共 68 个文件、约 2.3 MB，其中 1.6 MB 是内联的引擎与字体——这是刻意的：插件运行时**不联网、不装依赖**。
 
 ---
 
