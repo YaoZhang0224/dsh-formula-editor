@@ -1,4 +1,3 @@
-# dsh-formula-editor[README.md](https://github.com/user-attachments/files/34610708/README.md)
 # 公式编辑器 · Formula Editor for DeepSeek Harness
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -11,7 +10,7 @@
 
 ![公式编辑器界面](screenshot.png)
 
-**目录**：[它解决什么问题](#它解决什么问题) · [功能](#功能--features) · [前置要求](#前置要求--requirements) · [安装](#安装--install) · [配置 OCR](#配置-ocr--configuration) · [使用](#使用--usage) · [工作原理](#工作原理--how-it-works) · [从源码构建](#从源码构建--build) · [测试](#测试--tests) · [目录结构](#目录结构--project-layout) · [已知限制](#已知限制--known-limitations) · [第三方声明](#第三方声明--third-party-notices) · [License](#license)
+**目录**：[它解决什么问题](#它解决什么问题) · [功能](#功能--features) · [前置要求](#前置要求--requirements) · [安装](#安装--install) · [配置模型](#配置模型--configuration) · [使用](#使用--usage) · [工作原理](#工作原理--how-it-works) · [从源码构建](#从源码构建--build) · [测试](#测试--tests) · [目录结构](#目录结构--project-layout) · [已知限制](#已知限制--known-limitations) · [第三方声明](#第三方声明--third-party-notices) · [License](#license)
 
 ---
 
@@ -48,7 +47,7 @@
 ## 前置要求 · Requirements
 
 - **DeepSeek Harness** `>= 0.2.0-rc.1`（`package.json` 的 `engines.dsh`）
-- 一个 OpenAI 兼容的视觉模型 API（用于图片识别）。默认指向 `https://agi.tongji.edu.cn/v1` 的 `Qwen3.8-Flash-Next`，可以在插件 `Config` 里换成任意兼容 `/chat/completions` 的服务
+- **一个能看图的模型**，用来把图片读成 LaTeX。插件调用的是**你自己**的 OpenAI 兼容接口（`/chat/completions`），不绑定任何厂商——把你已经在用的那个视觉模型指过来就行，**不用为了这个插件单独申请 Key**。见 [配置模型](#配置模型--configuration)
 - 右侧边栏 Tab 需要 `dsh-better-sidebar`；**没有它插件照样能用**，只是少了右侧 Tab 和设置面板，左侧整页入口不受影响
 
 ---
@@ -111,30 +110,50 @@ plugin_manager remove_bundle({ target: 'dsh-formula-editor' })
 
 ---
 
-## 配置 OCR · Configuration
+## 配置模型 · Configuration
 
-图片识别需要一个视觉模型的 Key。有三种给法，按优先级从高到低：
+图片识别就是一次普通的 OpenAI 兼容 `/chat/completions` 调用，图片以 `image_url`（data URL）传过去。**用你自己已经在用的那个视觉模型就行**——你手上哪家有能看图的模型、有 Key，就用哪家，插件不绑定任何厂商，也不需要为了它单独申请账号。
 
-1. **在插件设置里填** —— 「设置 → 侧边卡片 → 公式编辑器 → 功能设置」，输入后保存。Key 存在 DSH 的凭据存储里，**不会写进插件文件**。
-2. **给插件自己的凭据 ref** —— 在 profile 的 `.credentials.yaml` 里写 `FORMULA_OCR_API_KEY`。
-3. **复用 profile 已有的 Key** —— 依次回退到 `TONGJI_AI_API_KEY`、`DEEPSEEK_API_KEY`。
+要配的只有两件事：**接口地址 + 模型名**，以及**那把 Key**。
 
-没配任何 Key 时，点识别会提示「尚未配置 OCR API Key」。
+### 接口与模型
 
-接口与模型可以通过插件的 `Config` 改：
+插件有三个 `Config` 字段，在 profile 的 `cordis.patch.yml` 里覆盖：
 
 ```yaml
-# cordis.patch.yml 里给这条 insert 加 config
-- insert:
-    - id: dsh-formula-editor
-      name: 'dsh-formula-editor'
-      config:
-        baseURL: 'https://api.openai.com/v1'
-        model: 'gpt-4o-mini'
-        apiKeyRef: 'FORMULA_OCR_API_KEY'
+- id: dsh-formula-editor
+  config:
+    baseURL: 'https://your-endpoint.example/v1'   # 任何 OpenAI 兼容的 /v1
+    model: 'your-vision-model'                    # 必须支持图片输入
+    apiKeyRef: 'FORMULA_OCR_API_KEY'              # 下面说的凭据名
 ```
 
-三个字段都有可用的默认值，所以不配也能跑（前提是 profile 里有同济/DeepSeek 的 Key）。
+改完 `Ctrl+R` 刷新页面即可生效（Loader 会热重载这一条）。
+
+> **一定要改成你自己的。** 插件里带的 `baseURL` / `model` 默认值只是作者开发时用的那家接口，**不是**这个插件的要求，也不代表你要用同一家。任何 OpenAI 兼容、支持图片输入的服务都能跑，换掉这两个值就行，其它都不用动。
+>
+> `baseURL` 只写到接口的 `/v1` 为止，插件自己拼 `/chat/completions`。
+> 挑模型时确认它**支持图片输入**——纯文本模型会把图片丢掉，或者直接报错。
+
+### Key
+
+Key 走 DSH 的凭据系统，两种给法：
+
+1. **在插件设置里填（推荐）** —— 「设置 → 侧边卡片 → 公式编辑器 → 功能设置」，粘贴后保存。值存在 DSH 的凭据存储里，**不会写进插件文件、不会进 git**。
+2. **写进 profile 的凭据文件** —— 在 `~/.dsh/.credentials.yaml` 的 `refs:` 下加一行，名字和上面的 `apiKeyRef` 对应：
+
+```yaml
+refs:
+  FORMULA_OCR_API_KEY: sk-your-key-here
+```
+
+设置面板会显示当前用的是哪把 Key、来自哪里（只显示来源，不显示值）。没配 Key 时点识别会提示「尚未配置 OCR API Key」。
+
+> 如果你本来就在 DSH 里配过某个视觉模型的 Key，可以把 `apiKeyRef` 直接指向那个已有的凭据名，不用再存一份。
+
+### 换个模型会怎样
+
+没有额外步骤。改完 `baseURL` / `model` 刷新页面，识别就走新接口。插件只要求对面认 OpenAI 的 `messages` + `image_url` 格式；返回内容从 `choices[0].message.content` 里取，包了 ```` ``` ````、`$$`、`\[` 这类外壳会自动剥掉。
 
 ---
 
@@ -328,7 +347,7 @@ dsh-formula-editor/
 - **OCR 依赖外部视觉模型 API**，需要网络与有效 Key。
 - **公式域内输入会触发 MathLive 的 inlineShortcuts**：打 `alpha` 会自动变 α、`sqrt` 变根号。这是 MathLive 的默认行为，想关掉可以设 `MathfieldElement.inlineShortcuts = {}`。
 - **Word 2007 以前的版本**不支持 MathML → OMath 转换。
-- **左侧入口的位次是 `order: 40`**，排在「技能中心」之后。要让位次变化，改 `src/client-ui.js` 里注册 `sidebar.panellist` 时的 `order` 再 `npm run build`。本机 profile 里已被占用的位次：`plugins`(0)、`dsh-market`(1)、`archived-sessions`(4)、`schedules`(10)、`skill-explorer`(30)。
+- **左侧入口的位次是 `order: 40`**，排在「技能中心」之后。要让位次变化，改 `src/client-ui.js` 里注册 `sidebar.panellist` 时的 `order` 再 `npm run build`。装上别的插件后位次可能撞车，此时改 `order` 即可——DSH 内置的几个入口通常占用 0、1、4、10、30 附近。
 - **插件列表图标有 256 KiB 上限**：超了 DSH 会把整个元数据读取判为失败，图标消失并在该行下面显示红色诊断。`npm run icon` 会断言这个预算。
 
 ---
