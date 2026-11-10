@@ -1,3 +1,4 @@
+# dsh-formula-editor[README.md](https://github.com/user-attachments/files/34610708/README.md)
 # 公式编辑器 · Formula Editor for DeepSeek Harness
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
