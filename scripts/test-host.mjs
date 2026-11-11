@@ -159,8 +159,8 @@ let state = JSON.parse(empty.body)
 assert.equal(state.configured, false)
 assert.equal(state.ownConfigured, false)
 assert.equal(state.writable, true)
-assert.deepEqual(state.fallbackRefs, ['TONGJI_AI_API_KEY', 'DEEPSEEK_API_KEY'])
-assert.equal(state.model, 'Qwen3.8-Flash-Next')
+assert.equal(state.baseURL, '')
+assert.equal(state.model, '')
 console.log('settings GET (empty):', JSON.stringify(state))
 
 const saved = await call('exact', '/plugins/dsh-formula-editor/settings', {
@@ -192,14 +192,17 @@ const cleared = await call('exact', '/plugins/dsh-formula-editor/settings', {
 assert.equal(cleared.status, 200)
 assert.equal(secrets.has('FORMULA_OCR_API_KEY'), false)
 
-/* Fallback: the profile's own vision key answers when the plugin has none. */
+/* The profile's other credentials are not borrowed: a key belongs to the service
+ * named by baseURL, and pairing them without the user saying so is how a DeepSeek
+ * key ends up posted to an unrelated endpoint. */
 secrets.set('TONGJI_AI_API_KEY', 'sk-profile')
+secrets.set('DEEPSEEK_API_KEY', 'sk-profile-deepseek')
 state = JSON.parse((await call('exact', '/plugins/dsh-formula-editor/settings')).body)
-assert.equal(state.configured, true)
+assert.equal(state.configured, false)
 assert.equal(state.ownConfigured, false)
-assert.equal(state.usingRef, 'TONGJI_AI_API_KEY')
 secrets.delete('TONGJI_AI_API_KEY')
-console.log('settings: save, blank refusal, clear, fallback all correct')
+secrets.delete('DEEPSEEK_API_KEY')
+console.log('settings: save, blank refusal, clear, no cross-credential fallback all correct')
 
 /* ------------------------------------------------------------------- ocr */
 
@@ -235,10 +238,23 @@ const noKey = await call('exact', '/plugins/dsh-formula-editor/ocr', {
 })
 assert.equal(noKey.status, 400)
 assert.equal(JSON.parse(noKey.body).error, 'api-key-missing')
-console.log('ocr route: 405, 415, 403, invalid-image, api-key-missing all correct')
 
-/* A live round trip only when a key is really configured on this machine.
- * OCR_API_KEY lets CI (or anyone without a DSH profile) opt in explicitly. */
+/* A key alone is not enough: without baseURL/model the plugin refuses rather than
+ * inventing an endpoint to post the key to. */
+secrets.set('FORMULA_OCR_API_KEY', 'sk-test-1234')
+const noEndpoint = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ image: 'data:image/png;base64,AAAA' }),
+})
+assert.equal(noEndpoint.status, 400)
+assert.equal(JSON.parse(noEndpoint.body).error, 'endpoint-missing')
+secrets.delete('FORMULA_OCR_API_KEY')
+console.log('ocr route: 405, 415, 403, invalid-image, api-key-missing, endpoint-missing all correct')
+
+/* A live round trip only when a key and an endpoint are really configured on this
+ * machine. OCR_API_KEY / OCR_BASE_URL / OCR_MODEL let CI (or anyone without a DSH
+ * profile) opt in explicitly. */
 const yaml = (() => {
   if (typeof process.env.OCR_API_KEY === 'string' && process.env.OCR_API_KEY.length > 0) return ''
   try {
@@ -247,14 +263,16 @@ const yaml = (() => {
     return ''
   }
 })()
-const liveKey = process.env.OCR_API_KEY ?? /TONGJI_AI_API_KEY:\s*(\S+)/.exec(yaml)?.[1]
+const liveKey = process.env.OCR_API_KEY ?? /FORMULA_OCR_API_KEY:\s*(\S+)/.exec(yaml)?.[1]
+const liveBaseURL = process.env.OCR_BASE_URL ?? ''
+const liveModel = process.env.OCR_MODEL ?? ''
 
-if (liveKey === undefined) {
-  console.log('ocr live call: skipped (no profile vision key)')
+if (liveKey === undefined || liveBaseURL.length === 0 || liveModel.length === 0) {
+  console.log('ocr live call: skipped (set OCR_API_KEY + OCR_BASE_URL + OCR_MODEL to run it)')
 } else if (SAMPLE_IMAGE === undefined) {
   console.log('ocr live call: skipped (sample image not found beside the workspace)')
 } else {
-  secrets.set('TONGJI_AI_API_KEY', liveKey)
+  secrets.set('FORMULA_OCR_API_KEY', liveKey)
   const png = readFileSync(SAMPLE_IMAGE).toString('base64')
   const started = Date.now()
   const live = await call('exact', '/plugins/dsh-formula-editor/ocr', {

@@ -47,7 +47,7 @@
 ## 前置要求 · Requirements
 
 - **DeepSeek Harness** `>= 0.2.0-rc.1`（`package.json` 的 `engines.dsh`）
-- **一个能看图的模型**，用来把图片读成 LaTeX。插件调用的是**你自己**的 OpenAI 兼容接口（`/chat/completions`），不绑定任何厂商——把你已经在用的那个视觉模型指过来就行，**不用为了这个插件单独申请 Key**。见 [配置模型](#配置模型--configuration)
+- **一个能看图的模型**，用来把图片读成 LaTeX。插件调用的是**你自己**的 OpenAI 兼容接口（`/chat/completions`），不绑定任何厂商——把你已经在用的那个视觉模型指过来就行，**不用为了这个插件单独申请 Key**。插件不带默认接口和默认模型，`baseURL` 与 `model` 必须由你填写；没填时点识别会提示尚未配置，不会向任何地址发请求。见 [配置模型](#配置模型--configuration)
 - 右侧边栏 Tab 需要 `dsh-better-sidebar`；**没有它插件照样能用**，只是少了右侧 Tab 和设置面板，左侧整页入口不受影响
 
 ---
@@ -116,6 +116,8 @@ plugin_manager remove_bundle({ target: 'dsh-formula-editor' })
 
 要配的只有两件事：**接口地址 + 模型名**，以及**那把 Key**。
 
+> **插件没有默认接口，也没有默认模型。** 这两个值必须写成你自己那家服务，因为它们决定了 Key 和截图发往哪里——只有你知道自己的 Key 属于哪个服务。留空时点识别会直接提示「尚未配置视觉模型接口」，不会向任何地址发请求。
+
 ### 接口与模型
 
 插件有三个 `Config` 字段，在 profile 的 `cordis.patch.yml` 里覆盖：
@@ -123,17 +125,16 @@ plugin_manager remove_bundle({ target: 'dsh-formula-editor' })
 ```yaml
 - id: dsh-formula-editor
   config:
-    baseURL: 'https://your-endpoint.example/v1'   # 任何 OpenAI 兼容的 /v1
-    model: 'your-vision-model'                    # 必须支持图片输入
+    baseURL: 'https://your-endpoint.example/v1'   # 任何 OpenAI 兼容的 /v1，必填
+    model: 'your-vision-model'                    # 必须支持图片输入，必填
     apiKeyRef: 'FORMULA_OCR_API_KEY'              # 下面说的凭据名
 ```
 
 改完 `Ctrl+R` 刷新页面即可生效（Loader 会热重载这一条）。
 
-> **一定要改成你自己的。** 插件里带的 `baseURL` / `model` 默认值只是作者开发时用的那家接口，**不是**这个插件的要求，也不代表你要用同一家。任何 OpenAI 兼容、支持图片输入的服务都能跑，换掉这两个值就行，其它都不用动。
->
 > `baseURL` 只写到接口的 `/v1` 为止，插件自己拼 `/chat/completions`。
 > 挑模型时确认它**支持图片输入**——纯文本模型会把图片丢掉，或者直接报错。
+> 任何 OpenAI 兼容、支持图片输入的服务都能跑，不限于某一家。
 
 ### Key
 
@@ -149,7 +150,9 @@ refs:
 
 设置面板会显示当前用的是哪把 Key、来自哪里（只显示来源，不显示值）。没配 Key 时点识别会提示「尚未配置 OCR API Key」。
 
-> 如果你本来就在 DSH 里配过某个视觉模型的 Key，可以把 `apiKeyRef` 直接指向那个已有的凭据名，不用再存一份。
+> 如果你本来就在 DSH 里配过某个视觉模型的 Key，可以把 `apiKeyRef` 直接指向那个已有的凭据名，不用再存一份——这是**显式**指定，插件不会自己去借用别的凭据。
+>
+> 插件只读 `apiKeyRef` 指向的那一个凭据，不会自动回退到 `TONGJI_AI_API_KEY`、`DEEPSEEK_API_KEY` 之类的其它凭据。原因很直接：Key 属于哪个服务只有你知道，而请求是发往 `baseURL` 的；自动借用会把一把属于 A 服务的 Key 发给 B 服务的地址，连截图一起。
 
 ### 换个模型会怎样
 

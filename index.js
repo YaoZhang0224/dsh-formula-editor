@@ -8,9 +8,10 @@
  *   GET|POST /plugins/dsh-formula-editor/settings  read / write the OCR API key
  *   GET  /plugins/dsh-formula-editor/assets/*  the KaTeX font files the preview needs
  *
- * The key lives in the `credentials` seam under `FORMULA_OCR_API_KEY`; when that is
- * unset the plugin falls back to the key this profile already carries for the vision
- * provider, so the editor works out of the box and still has a real settings entry.
+ * The key lives in the `credentials` seam under `FORMULA_OCR_API_KEY`, and the endpoint
+ * and model come from this plugin's own config. Neither has a built-in default: the key
+ * is posted to `baseURL` as a Bearer token together with the screenshot, so only the
+ * user can say which service both of them belong to.
  */
 import { promises as fsp } from 'node:fs'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
@@ -30,11 +31,18 @@ const ROUTE_ASSETS = '/plugins/dsh-formula-editor/assets'
 
 /** The ref this plugin owns. */
 const KEY_REF = 'FORMULA_OCR_API_KEY'
-/** Refs the profile may already carry for the same vision provider, in fallback order. */
-const FALLBACK_REFS = ['TONGJI_AI_API_KEY', 'DEEPSEEK_API_KEY']
 
-const DEFAULT_BASE_URL = 'https://agi.tongji.edu.cn/v1'
-const DEFAULT_MODEL = 'Qwen3.8-Flash-Next'
+/**
+ * No default endpoint and no default model.
+ *
+ * Both have to name the service the user's key belongs to, and only the user knows
+ * that. A built-in default is not a convenience: the key is sent as a Bearer token
+ * to whatever `baseURL` says, together with the screenshot, so a default pointing at
+ * one particular vendor sends every unconfigured install's key to that vendor. The
+ * plugin asks for the two values instead of guessing them.
+ */
+const DEFAULT_BASE_URL = ''
+const DEFAULT_MODEL = ''
 
 /** Request bodies above this are refused before parsing. */
 const MAX_BODY_BYTES = 24 * 1024 * 1024
@@ -109,20 +117,25 @@ function settingsOf(config) {
 }
 
 /**
- * Read the API key: the plugin's own ref first, then the profile's vision-provider refs.
+ * Read the API key: only the ref this plugin owns.
+ *
+ * It deliberately does not fall back to the profile's other credentials. A key names
+ * one service; the request goes to `baseURL`, which is a different value the user sets
+ * independently. Borrowing `TONGJI_AI_API_KEY` or `DEEPSEEK_API_KEY` meant that a
+ * profile holding only a DeepSeek key would have it sent to whichever endpoint the
+ * config named — the user never agreed to that pairing.
+ *
  * @returns the key and where it came from, or an empty value when nothing is configured.
  */
 async function resolveKey(ctx, apiKeyRef) {
   const credentials = ctx.get('credentials')
   if (credentials === undefined) return { value: '', source: 'unavailable' }
-  for (const ref of [apiKeyRef, ...FALLBACK_REFS.filter((one) => one !== apiKeyRef)]) {
-    try {
-      const resolved = await credentials.resolve(ref)
-      const value = typeof resolved?.value === 'string' ? resolved.value.trim() : ''
-      if (value.length > 0) return { value, source: resolved.source ?? 'file', ref }
-    } catch {
-      /* a ref outside the grammar has no value to miss */
-    }
+  try {
+    const resolved = await credentials.resolve(apiKeyRef)
+    const value = typeof resolved?.value === 'string' ? resolved.value.trim() : ''
+    if (value.length > 0) return { value, source: resolved.source ?? 'file', ref: apiKeyRef }
+  } catch {
+    /* a ref outside the grammar has no value to miss */
   }
   return { value: '', source: 'none' }
 }
@@ -324,6 +337,13 @@ export function apply(ctx, config) {
             json(res, 400, { error: 'api-key-missing', detail: 'Set the OCR API key in this plugin’s settings.' })
             return
           }
+          if (settings.baseURL.length === 0 || settings.model.length === 0) {
+            json(res, 400, {
+              error: 'endpoint-missing',
+              detail: 'Set the vision endpoint and model in this plugin’s settings: the key is sent to that endpoint, so the plugin does not pick one for you.',
+            })
+            return
+          }
           try {
             const latex = await recognize({
               baseURL: settings.baseURL,
@@ -366,7 +386,6 @@ export function apply(ctx, config) {
               source: key.source,
               ref: settings.apiKeyRef,
               usingRef: key.ref ?? settings.apiKeyRef,
-              fallbackRefs: FALLBACK_REFS,
               baseURL: settings.baseURL,
               model: settings.model,
               writable: credentials !== undefined,

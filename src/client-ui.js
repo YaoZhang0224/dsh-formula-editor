@@ -952,6 +952,9 @@ function FormulaEditor(props) {
         if (payload.error === 'api-key-missing') {
           throw new Error('尚未配置 OCR API Key：请在「设置 → 侧边卡片 → 公式编辑器」里填写。')
         }
+        if (payload.error === 'endpoint-missing') {
+          throw new Error('尚未配置视觉模型接口：请在 profile 的 cordis.patch.yml 里给本插件设置 baseURL 和 model。')
+        }
         throw new Error(detail.length > 0 ? detail : `识别失败（HTTP ${response.status}）`)
       }
       const latex = typeof payload.latex === 'string' ? payload.latex : ''
@@ -1322,7 +1325,7 @@ function FormulaSettings(props) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       updatePluginSetting?.('apiKeyDraft', '')
       setDraft('')
-      setStatus('已清除插件自己的 Key，将回退到环境里的视觉模型 Key')
+      setStatus('已清除插件自己的 Key')
       await refresh()
     } catch (problem) {
       setStatus(`清除失败：${problem.message}`)
@@ -1355,7 +1358,7 @@ function FormulaSettings(props) {
         ? `当前状态：已配置（来源 ${source}${usingRef.length > 0 ? `，${usingRef}` : ''}）`
         : '当前状态：未配置，图片识别会提示缺少 Key'),
     h('div', { className: 'dsffe-hint' },
-      `接口：${info?.baseURL ?? 'https://agi.tongji.edu.cn/v1'} · 模型：${info?.model ?? 'Qwen3.8-Flash-Next'}`),
+      `接口：${info?.baseURL ? info.baseURL : '未设置'} · 模型：${info?.model ? info.model : '未设置'}`),
     status.length > 0 ? h('div', { className: 'dsffe-hint' }, status) : null,
   )
 }

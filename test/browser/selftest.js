@@ -437,7 +437,7 @@
     await until(() => settingsHost.textContent.includes('当前状态'), 'the settings status line')
     check('settings: password input', document.querySelector('#settings input[type=password]') !== null)
     check('settings: shows configured state', settingsHost.textContent.includes('已配置'), settingsHost.textContent.slice(0, 120))
-    check('settings: shows endpoint', settingsHost.textContent.includes('agi.tongji.edu.cn'))
+    check('settings: shows endpoint', settingsHost.textContent.includes('vision.example'))
 
     record('summary', checks.every((one) => one.ok), `${checks.filter((one) => one.ok).length}/${checks.length}`)
   } catch (problem) {
