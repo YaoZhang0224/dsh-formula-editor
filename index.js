@@ -77,8 +77,11 @@ export const name = 'dsh-formula-editor'
 export const inject = ['webServer']
 
 /**
- * Plain-object config: `baseURL` / `model` / `apiKeyRef` are the only knobs, and every
- * one of them has a working default, so an unconfigured install still recognizes.
+ * Plain-object config: `baseURL` / `model` / `apiKeyRef` are the only knobs.
+ *
+ * `apiKeyRef` defaults to the ref this plugin owns. `baseURL` and `model` default to
+ * the empty string on purpose — they name the service the key belongs to, so the user
+ * sets them; see {@link DEFAULT_BASE_URL}.
  */
 export const Config = {
   type: 'object',
