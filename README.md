@@ -249,11 +249,24 @@ MathLive 的 `<math-field>` 是 contenteditable + shadow DOM，和 React 一起�
 - **模板光标用 `#@`**：`insert('\\frac{#@}{}')` 会把光标送进分子，读回源码时要剥掉 `\\placeholder{}`。
 - **居中只能写 `::part(content)`**：`container` 是 `inline-flex` + `justify-content: space-between`，改它没用。
 
-### 为什么用同源路由
+### 为什么用同源路由，以及谁在守门
 
 `webServer.register` 的三条路由都挂在插件自己的 `/plugins/dsh-formula-editor/` 前缀下，页面用同源 `fetch()` 调用，自动带认证，规避 CORS 与 401。字体必须自己提供：`frontend-static` 的 MIME 表没有 `.woff2`，`client-modules` 的 assets 路由只认图片扩展名。
 
 前缀**不能带尾斜杠**：`webServer.match` 只接受 `pathname === prefix || pathname.startsWith(prefix + '/')`。
+
+**准入交给 DSH 的 `connection` 服务，插件不自己写判断。** 三条路由的第一行都是：
+
+```js
+const rejection = connection.requestRejection(req)   // undefined 才继续
+if (rejection !== undefined) { /* 401 或 403 */ }
+```
+
+`requestRejection` 做两件事：先过 Host/Origin 围栏（`Host` 必须是本机或 `trustedHosts` 里声明过的地址、`sec-fetch-site` 不能是 `cross-site`、有 `Origin` 时必须与 `Host` 一致），再验浏览器会话 cookie。这也正是 `@deepseek-ai/dsh-host-open-in-app` 等 DSH 自带 host 插件的做法。
+
+为什么不自己比较 `Origin === Host`：**DNS 重绑定的时候两个头里都是攻击者的域名**，比出来的结果永远是「一致」。而设置路由能改 `baseURL`、能写 Key，一旦放行，攻击者只要把自己的地址填进去、再触发一次识别，Key 和截图就都发出去了。会话 cookie 这一层也补上了——脚本发起的请求没有 cookie，直接 401。
+
+`connection` 写在 `inject` 里，所以 profile 里没有这个服务时插件不会挂载路由，而不是挂载一组无人看守的路由。
 
 ---
 
@@ -294,7 +307,7 @@ npm run test:all     # 全部
 | --- | --- |
 | `scripts/test-convert.mjs` | 12 个公式（重音 / 矩阵 / 积分 / 根式 / cases）走完整转换管线 |
 | `scripts/test-symbols.mjs` | 272 个符号逐项过 temml，10 种样式，`splitInsert` 契约 |
-| `scripts/test-host.mjs` | 三条 Host 路由的状态码与错误分支；有 Key 时跑一次真实 OCR |
+| `scripts/test-host.mjs` | 三条 Host 路由的状态码与错误分支；`connection` 围栏的 401/403 分支；有 Key 时跑一次真实 OCR |
 | `scripts/test-relocate.mjs` | 把插件复制到**带空格**的新路径，断言仍能 import、资产齐全、无绝对路径残留 |
 | `test/browser/run.mjs` | 无头 Chrome 跑真实 React 组件：注册元数据、两个菜单的标签与剪贴板输出、Word 剪贴板 payload、MathLive 双向同步、11 个符号图库逐项渲染、撤销重做、导航图标网格 |
 
@@ -316,7 +329,7 @@ npm run verify       # → INSTALL OK
 
 ```
 dsh-formula-editor/
-├── index.js                 Host 半边：OCR / 设置 / 资产三条同源路由
+├── index.js                 Host 半边：OCR / 设置 / 资产三条同源路由（connection 围栏）
 ├── client.js                构建产物：Client 半边（__ModuleLoader__ 注册 + 内联转换模块）
 ├── package.json             dsh.bundle.patch + dsh.client(platform: web)
 ├── cordis.patch.yml         bundle patch（insert 一条 id: dsh-formula-editor）

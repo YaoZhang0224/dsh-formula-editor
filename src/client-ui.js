@@ -1276,7 +1276,22 @@ function FormulaSettings(props) {
   const refresh = React.useCallback(async () => {
     try {
       const response = await fetch(ROUTE_SETTINGS)
-      const payload = await response.json()
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        /* The host routes sit behind DSH's trust fence; a page without its session
+         * cookie is answered 401 and a cross-site caller 403. Say so instead of
+         * rendering an empty settings panel as if the plugin were unconfigured. */
+        if (response.status === 401) {
+          setStatus('当前页面没有通过 DSH 的会话校验（401），请从 DSH 正常打开的页面访问。')
+          return
+        }
+        if (response.status === 403) {
+          setStatus('请求被 DSH 的 Host/Origin 围栏拒绝（403）。')
+          return
+        }
+        setStatus(`读取设置失败：${payload.detail ?? payload.error ?? `HTTP ${response.status}`}`)
+        return
+      }
       setInfo(payload)
     } catch (problem) {
       setStatus(`读取设置失败：${problem.message}`)

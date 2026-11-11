@@ -1,6 +1,6 @@
 {
   "name": "dsh-formula-editor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "A formula editor plugin for DeepSeek Harness: image-to-LaTeX OCR, a Word-style symbol palette, an editable MathLive formula field, and one-click copy as a Word-native equation or export to .docx.",

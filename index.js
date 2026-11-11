@@ -1,12 +1,19 @@
 /**
  * dsh-formula-editor — host half.
  *
- * Three same-origin routes, all under the plugin's own `/plugins/dsh-formula-editor/`
+ * Three routes, all under the plugin's own `/plugins/dsh-formula-editor/`
  * prefix so the browser page reaches them with its own session cookie and no CORS:
  *
  *   POST /plugins/dsh-formula-editor/ocr       image -> LaTeX through a vision model
  *   GET|POST /plugins/dsh-formula-editor/settings  read / write the OCR API key
  *   GET  /plugins/dsh-formula-editor/assets/*  the KaTeX font files the preview needs
+ *
+ * Every route asks the composition's `connection` service for a rejection before it
+ * does anything (`requestRejection`). That is DSH's own Host/Origin fence plus its
+ * browser-session cookie: it rejects a `Host` that is not loopback or a configured
+ * `trustedHosts` authority, a cross-site `sec-fetch-site`, an `Origin` that disagrees
+ * with `Host`, and any request without a valid signed cookie. Comparing `Origin` with
+ * `Host` alone is not enough — under DNS rebinding both carry the attacker's name.
  *
  * The key lives in the `credentials` seam under `FORMULA_OCR_API_KEY`, and the endpoint
  * and model come from this plugin's own config. Neither has a built-in default: the key
@@ -73,8 +80,13 @@ const OCR_PROMPT = [
 /** Stable Cordis plugin name. */
 export const name = 'dsh-formula-editor'
 
-/** Services required before the routes can mount. */
-export const inject = ['webServer']
+/**
+ * Services required before the routes can mount.
+ *
+ * `connection` is not optional: it carries the only trust fence these routes have, so a
+ * profile without it mounts nothing rather than mounting unguarded routes.
+ */
+export const inject = ['webServer', 'connection']
 
 /**
  * Plain-object config: `baseURL` / `model` / `apiKeyRef` are the only knobs.
@@ -143,12 +155,38 @@ async function resolveKey(ctx, apiKeyRef) {
   return { value: '', source: 'none' }
 }
 
-/** Whether a request came from the page this server serves. */
-function sameOrigin(req) {
-  const origin = req.headers.origin
-  const host = req.headers.host
-  if (origin === undefined || host === undefined) return true
-  return origin === `http://${host}` || origin === `https://${host}`
+/**
+ * The composition's `connection` service.
+ *
+ * Typed locally because the package is browser-side; `Reflect.get` mirrors how DSH's own
+ * host routes (`@deepseek-ai/dsh-host-open-in-app`) reach the service.
+ */
+function connectionOf(ctx) {
+  return Reflect.get(ctx, 'connection')
+}
+
+/**
+ * Refuse a request DSH's trust fence will not admit.
+ *
+ * This is the plugin's whole admission story, and it is deliberately DSH's rather than a
+ * hand-rolled check. `requestRejection` applies the Host/Origin fence (Host must be
+ * loopback or a configured `trustedHosts` authority, `sec-fetch-site` must not be
+ * cross-site, and `Origin` — when present — must agree with `Host`) and then the
+ * browser-session cookie. A local `Origin === Host` comparison is not a substitute: under
+ * DNS rebinding both headers carry the attacker's name, so it passes the attacker.
+ *
+ * @returns true when this request has been answered and the caller must stop.
+ */
+function rejectUntrusted(ctx, req, res) {
+  const connection = connectionOf(ctx)
+  if (connection === undefined || typeof connection.requestRejection !== 'function') {
+    json(res, 503, { error: 'connection-unavailable' })
+    return true
+  }
+  const rejection = connection.requestRejection(req)
+  if (rejection === undefined) return false
+  json(res, rejection, { error: rejection === 401 ? 'unauthenticated' : 'untrusted-request' })
+  return true
 }
 
 /** Write one JSON reply. */
@@ -191,10 +229,6 @@ function admitJson(req, res) {
   }
   if (!(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
     json(res, 415, { error: 'json-required' })
-    return false
-  }
-  if (!sameOrigin(req)) {
-    json(res, 403, { error: 'origin-rejected' })
     return false
   }
   return true
@@ -321,6 +355,7 @@ export function apply(ctx, config) {
       kind: 'exact',
       path: ROUTE_OCR,
       handler: (req, res) => {
+        if (rejectUntrusted(ctx, req, res)) return
         if (!admitJson(req, res)) return
         void (async () => {
           let body
@@ -373,6 +408,7 @@ export function apply(ctx, config) {
       kind: 'exact',
       path: ROUTE_SETTINGS,
       handler: (req, res) => {
+        if (rejectUntrusted(ctx, req, res)) return
         void (async () => {
           const credentials = ctx.get('credentials')
           if (req.method === 'GET') {
@@ -434,6 +470,7 @@ export function apply(ctx, config) {
       kind: 'prefix',
       path: ROUTE_ASSETS,
       handler: (req, res) => {
+        if (rejectUntrusted(ctx, req, res)) return
         void serveAsset(req, res, new URL(req.url ?? '/', 'http://x').pathname).catch((error) => {
           ctx.logger?.warn?.(error)
           if (!res.headersSent) res.writeHead(500)
