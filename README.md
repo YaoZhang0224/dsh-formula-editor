@@ -1,7 +1,7 @@
 # 公式编辑器 · Formula Editor for DeepSeek Harness
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![DSH](https://img.shields.io/badge/DeepSeek%20Harness-%3E%3D0.2.0--rc.1-4b6bfb.svg)](https://github.com/deepseek-ai)
+[![DSH](https://img.shields.io/badge/DeepSeek%20Harness-any%20version-4b6bfb.svg)](https://github.com/deepseek-ai)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#从源码构建--build)
 
 > 在 [DeepSeek Harness](https://github.com/deepseek-ai) 里装一个「公式编辑器」：**图片 → LaTeX → Word 原生可编辑公式**。
@@ -46,7 +46,7 @@
 
 ## 前置要求 · Requirements
 
-- **DeepSeek Harness** `>= 0.2.0-rc.1`（`package.json` 的 `engines.dsh`）
+- **DeepSeek Harness** 任意版本（`package.json` 的 `engines.dsh` 声明为 `*`，不设下限也不设上限）
 - **一个能看图的模型**，用来把图片读成 LaTeX。插件调用的是**你自己**的 OpenAI 兼容接口（`/chat/completions`），不绑定任何厂商——把你已经在用的那个视觉模型指过来就行，**不用为了这个插件单独申请 Key**。插件不带默认接口和默认模型，`baseURL` 与 `model` 必须由你填写；没填时点识别会提示尚未配置，不会向任何地址发请求。见 [配置模型](#配置模型--configuration)
 - 右侧边栏 Tab 需要 `dsh-better-sidebar`；**没有它插件照样能用**，只是少了右侧 Tab 和设置面板，左侧整页入口不受影响
 
