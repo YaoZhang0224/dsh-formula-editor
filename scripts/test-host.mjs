@@ -2,17 +2,19 @@
  * Host-half smoke test: mount index.js against a fake context and exercise every
  * route the browser page will call. No DSH process involved.
  *
+ * The fake exposes what the real Host does: `llm` (provider catalog + one streaming
+ * call), `attachments` (image publishing), `agentDefaultModel` (the Harness default),
+ * and `configEditor` (persisting a chosen route). The OCR path is therefore tested
+ * end to end against a stub model, with no key and no network.
+ *
  * Run: node scripts/test-host.mjs
  */
 
 import { strict as assert } from 'node:assert'
-import { createRequire } from 'node:module'
 import { existsSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const require = createRequire(import.meta.url)
 const plugin = await import('../index.js')
 
 /* The sample screenshot ships in test/fixtures so the live OCR check works from
@@ -33,8 +35,6 @@ const routes = new Map()
  * A stand-in for DSH's `connection` service, holding just the fence semantics the
  * routes rely on: reject a non-loopback `Host`, a cross-site `sec-fetch-site`, an
  * `Origin` that disagrees with `Host`, and any request without the session cookie.
- * The real service lives in `@deepseek-ai/dsh-client-connection`; this fake exists so
- * the tests can drive each rejection without a running Harness.
  */
 const SESSION_COOKIE = 'dsh-auth-test=valid'
 const connection = {
@@ -51,8 +51,92 @@ const connection = {
   },
 }
 
+/* ------------------------------------------------------- model catalog */
+
+const MODEL_REPLY = '\\int_{0}^{\\infty} \\frac{x^3}{e^x - 1} \\, dx = \\frac{\\pi^4}{15}'
+
+const CATALOG = {
+  'vision-ai': [
+    { id: 'text-only', name: 'Text Only', inputModalities: ['text'] },
+    { id: 'sees-images', name: 'Sees Images', inputModalities: ['text', 'image'] },
+  ],
+  'plain-ai': [
+    { id: 'chat', name: 'Chat', inputModalities: ['text'] },
+  ],
+}
+
+/** Every streamed call this run made, so the tests can assert on the request. */
+const calls = []
+let streamReply = MODEL_REPLY
+let streamFailure = ''
+
+function info(provider, id) {
+  const found = (CATALOG[provider] ?? []).find((entry) => entry.id === id)
+  if (found === undefined) throw new Error(`no such model ${provider}/${id}`)
+  return { provider, ...found }
+}
+
+const llm = {
+  listProviders() {
+    return [{ id: 'vision-ai', name: 'Vision AI' }, { id: 'plain-ai', name: 'Plain AI' }]
+  },
+  async listModels(provider) {
+    return (CATALOG[provider] ?? []).map((entry) => ({ provider, ...entry }))
+  },
+  async resolveModelInfo(provider, model) {
+    return info(provider, model)
+  },
+  async prepareCall(config) {
+    info(config.provider, config.model)
+    const resolved = { ...config }
+    return {
+      config: resolved,
+      retryPolicy: { mode: 'normal', maxRetries: 0, retryableCodes: [], initialDelayMs: 0, maxDelayMs: 0, jitterRatio: 0 },
+      adapterDefaults: {},
+      stream(options) {
+        calls.push({ config: resolved, options })
+        return (async function* chunks() {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          if (streamFailure.length > 0) {
+            yield { type: 'finish', reason: { kind: 'error', failure: { message: streamFailure, code: 'stub' } } }
+            return
+          }
+          yield { type: 'text-delta', index: 0, text: streamReply }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: streamReply } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        })()
+      },
+    }
+  },
+}
+
+/** Images published through `attachments`, keyed by the id handed back. */
+const stored = new Map()
+let nextAttachment = 1
+
+const attachments = {
+  async saveImage(input) {
+    const attachmentId = `att-${nextAttachment++}`
+    const ref = { attachmentId, mediaType: input.mediaType, bytes: input.data.length, width: 100, height: 40, name: input.name }
+    stored.set(attachmentId, { ...ref, data: input.data })
+    return ref
+  },
+}
+
+let defaultSelection = { provider: 'vision-ai', model: 'sees-images' }
+const agentDefaultModel = {
+  currentSelection() { return { ...defaultSelection } },
+}
+
+const edits = []
+const configEditor = {
+  async edit(entry, change) {
+    edits.push({ entry, change })
+  },
+}
+
 const ctx = {
-  effect(callback, label) {
+  effect(callback) {
     const dispose = callback()
     return typeof dispose === 'function' ? dispose : () => {}
   },
@@ -64,9 +148,13 @@ const ctx = {
       return () => { routes.delete(key) }
     },
   },
+  fiber: { entry: { id: 'include:dsh-formula-editor' } },
   get(name) {
-    if (name === 'credentials') return credentials
     if (name === 'connection') return connection
+    if (name === 'llm') return llm
+    if (name === 'attachments') return attachments
+    if (name === 'agentDefaultModel') return agentDefaultModel
+    if (name === 'configEditor') return configEditor
     return undefined
   },
   logger: { warn() {} },
@@ -75,24 +163,6 @@ const ctx = {
 /* The routes reach `connection` through Reflect.get, exactly as DSH's own host routes
  * do; expose the fake there too so both lookups agree. */
 Object.defineProperty(ctx, 'connection', { value: connection, enumerable: true })
-
-const secrets = new Map()
-const credentials = {
-  async resolve(ref) {
-    const value = secrets.get(ref)
-    return value === undefined ? undefined : { value, source: 'file' }
-  },
-  async describe(ref) {
-    return { configured: secrets.has(ref), writable: true }
-  },
-  async set(ref, value) {
-    if (typeof value !== 'string' || value.length === 0) throw new Error('empty')
-    secrets.set(ref, value)
-  },
-  async unset(ref) {
-    secrets.delete(ref)
-  },
-}
 
 /**
  * One request/response round trip against a registered route.
@@ -105,7 +175,6 @@ function call(kind, path, { method = 'GET', body, headers = {}, url } = {}) {
   const route = routes.get(`${kind} ${path}`)
   assert.ok(route !== undefined, `route ${kind} ${path} is not registered`)
   return new Promise((accept) => {
-    const chunks = []
     const req = {
       method,
       url: url ?? path,
@@ -139,7 +208,8 @@ function call(kind, path, { method = 'GET', body, headers = {}, url } = {}) {
 
 /* ---------------------------------------------------------------- mount */
 
-plugin.apply(ctx, {})
+const config = {}
+plugin.apply(ctx, config)
 
 assert.deepEqual(
   [...routes.keys()].sort(),
@@ -187,70 +257,106 @@ console.log('assets route: css, fonts, vendor js, traversal, 404, 405 all correc
 
 /* -------------------------------------------------------------- settings */
 
-const empty = await call('exact', '/plugins/dsh-formula-editor/settings')
-assert.equal(empty.status, 200)
-let state = JSON.parse(empty.body)
-assert.equal(state.configured, false)
-assert.equal(state.ownConfigured, false)
+const SETTINGS = '/plugins/dsh-formula-editor/settings'
+const OCR = '/plugins/dsh-formula-editor/ocr'
+
+let state = JSON.parse((await call('exact', SETTINGS)).body)
+assert.equal(state.ok, true)
+assert.equal(state.source, 'default', 'the Harness default model is followed with no configuration')
+assert.equal(state.provider, 'vision-ai')
+assert.equal(state.model, 'sees-images')
+assert.equal(state.pinned, false)
 assert.equal(state.writable, true)
-assert.equal(state.baseURL, '')
-assert.equal(state.model, '')
-console.log('settings GET (empty):', JSON.stringify(state))
+assert.deepEqual(
+  state.models.map((entry) => `${entry.provider}/${entry.model}`),
+  ['vision-ai/sees-images'],
+  'only image-capable models are offered',
+)
+console.log('settings GET (unconfigured):', state.provider, state.model, `(${state.models.length} vision model)`)
 
-const saved = await call('exact', '/plugins/dsh-formula-editor/settings', {
+/* A text-only default falls back to the catalog instead of failing. */
+defaultSelection = { provider: 'plain-ai', model: 'chat' }
+state = JSON.parse((await call('exact', SETTINGS)).body)
+assert.equal(state.ok, true)
+assert.equal(state.source, 'auto')
+assert.equal(state.provider, 'vision-ai')
+assert.equal(state.model, 'sees-images')
+
+/* No vision model anywhere is reported, not guessed. */
+const savedCatalog = { ...CATALOG }
+CATALOG['vision-ai'] = [{ id: 'text-only', name: 'Text Only', inputModalities: ['text'] }]
+state = JSON.parse((await call('exact', SETTINGS)).body)
+assert.equal(state.ok, false)
+assert.equal(state.error, 'no-vision-model')
+CATALOG['vision-ai'] = savedCatalog['vision-ai']
+console.log('settings: follows the default, falls back to the catalog, reports an empty catalog')
+
+/* Pinning a route persists through configEditor; a text-only pin is refused. */
+let pinned = await call('exact', SETTINGS, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ apiKey: 'sk-test-1234' }),
+  body: JSON.stringify({ provider: 'vision-ai', model: 'sees-images' }),
 })
-assert.equal(saved.status, 200)
-assert.equal(secrets.get('FORMULA_OCR_API_KEY'), 'sk-test-1234')
+assert.equal(pinned.status, 200)
+assert.equal(edits.length, 1, 'the pin was written through configEditor')
+assert.deepEqual(edits[0].change({}), { provider: 'vision-ai', model: 'sees-images' })
 
-state = JSON.parse((await call('exact', '/plugins/dsh-formula-editor/settings')).body)
-assert.equal(state.configured, true)
-assert.equal(state.ownConfigured, true)
-assert.equal(state.usingRef, 'FORMULA_OCR_API_KEY')
-console.log('settings POST then GET:', state.source, state.usingRef)
-
-const blank = await call('exact', '/plugins/dsh-formula-editor/settings', {
+pinned = await call('exact', SETTINGS, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ apiKey: '   ' }),
+  body: JSON.stringify({ provider: 'plain-ai', model: 'chat' }),
 })
-assert.equal(blank.status, 400)
+assert.equal(pinned.status, 400)
+assert.equal(JSON.parse(pinned.body).error, 'model-not-vision')
 
-const cleared = await call('exact', '/plugins/dsh-formula-editor/settings', {
+pinned = await call('exact', SETTINGS, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ clear: true }),
+  body: JSON.stringify({ provider: 'vision-ai', model: 'nope' }),
 })
-assert.equal(cleared.status, 200)
-assert.equal(secrets.has('FORMULA_OCR_API_KEY'), false)
+assert.equal(pinned.status, 400)
+assert.equal(JSON.parse(pinned.body).error, 'model-unavailable')
 
-/* The profile's other credentials are not borrowed: a key belongs to the service
- * named by baseURL, and pairing them without the user saying so is how a DeepSeek
- * key ends up posted to an unrelated endpoint. */
-secrets.set('TONGJI_AI_API_KEY', 'sk-profile')
-secrets.set('DEEPSEEK_API_KEY', 'sk-profile-deepseek')
-state = JSON.parse((await call('exact', '/plugins/dsh-formula-editor/settings')).body)
-assert.equal(state.configured, false)
-assert.equal(state.ownConfigured, false)
-secrets.delete('TONGJI_AI_API_KEY')
-secrets.delete('DEEPSEEK_API_KEY')
-console.log('settings: save, blank refusal, clear, no cross-credential fallback all correct')
+pinned = await call('exact', SETTINGS, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ provider: 'vision-ai' }),
+})
+assert.equal(pinned.status, 400)
+assert.equal(JSON.parse(pinned.body).error, 'incomplete-route')
+console.log('settings POST: pin persists, text-only and unknown models and half a route are refused')
+
+/* `{ reset: true }` drops the pin, so the config is empty again. The fake
+ * `configEditor` only records the write, so the test clears the live config the way a
+ * real profile reload would. */
+config.provider = 'vision-ai'
+config.model = 'sees-images'
+defaultSelection = { provider: 'vision-ai', model: 'sees-images' }
+pinned = await call('exact', SETTINGS, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ reset: true }),
+})
+assert.equal(pinned.status, 200)
+assert.deepEqual(edits.at(-1).change({}), { provider: '', model: '' })
+config.provider = ''
+config.model = ''
+assert.equal(JSON.parse(pinned.body).source, 'default', 'reset follows the Harness again')
+console.log('settings POST: reset drops the pin and follows the Harness again')
 
 /* ------------------------------------------------------------------- ocr */
 
-const notPost = await call('exact', '/plugins/dsh-formula-editor/ocr', { method: 'GET' })
+const notPost = await call('exact', OCR, { method: 'GET' })
 assert.equal(notPost.status, 405)
 
-const notJson = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+const notJson = await call('exact', OCR, {
   method: 'POST',
   headers: { 'content-type': 'text/plain' },
   body: '{}',
 })
 assert.equal(notJson.status, 415)
 
-/* The trust fence runs before anything else on every route. These four cases are the
+/* The trust fence runs before anything else on every route. These five cases are the
  * ones a hand-rolled `Origin === Host` check lets through: a rebound DNS name is both
  * the `Host` and the `Origin`, and a scripted request simply omits the cookie. */
 const cases = [
@@ -262,9 +368,9 @@ const cases = [
 ]
 for (const [label, headers, status] of cases) {
   for (const [kind, path] of [
-    ['exact', '/plugins/dsh-formula-editor/ocr'],
-    ['exact', '/plugins/dsh-formula-editor/settings'],
-    ['prefix', '/plugins/dsh-formula-editor/assets'],
+    ['exact', OCR],
+    ['exact', SETTINGS],
+    ['prefix', ASSET_ROUTE],
   ]) {
     const blocked = await call(kind, path, {
       method: kind === 'exact' ? 'POST' : 'GET',
@@ -277,7 +383,7 @@ for (const [label, headers, status] of cases) {
 }
 console.log('trust fence: 403 on rebound host / cross-site / origin mismatch, 401 without cookie, on all 3 routes')
 
-const noImage = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+const noImage = await call('exact', OCR, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({}),
@@ -285,61 +391,118 @@ const noImage = await call('exact', '/plugins/dsh-formula-editor/ocr', {
 assert.equal(noImage.status, 400)
 assert.equal(JSON.parse(noImage.body).error, 'invalid-image')
 
-const noKey = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+/* A `data:` URL that is not one of the four accepted image types is refused before
+ * anything is written to the attachment store. */
+const storedBefore = stored.size
+const notAnImage = await call('exact', OCR, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ image: 'data:image/png;base64,AAAA' }),
+  body: JSON.stringify({ image: 'data:text/plain;base64,aGk=' }),
 })
-assert.equal(noKey.status, 400)
-assert.equal(JSON.parse(noKey.body).error, 'api-key-missing')
+assert.equal(notAnImage.status, 400)
+assert.equal(JSON.parse(notAnImage.body).error, 'invalid-image')
+assert.equal(stored.size, storedBefore, 'a refused image writes nothing')
 
-/* A key alone is not enough: without baseURL/model the plugin refuses rather than
- * inventing an endpoint to post the key to. */
-secrets.set('FORMULA_OCR_API_KEY', 'sk-test-1234')
-const noEndpoint = await call('exact', '/plugins/dsh-formula-editor/ocr', {
+/* A live round trip through the stub model: the picture is published as an attachment
+ * and the request carries a normal image block, exactly as a pasted screenshot would. */
+const png = SAMPLE_IMAGE === undefined
+  ? Buffer.from('89504e470d0a1a0a', 'hex')
+  : readFileSync(SAMPLE_IMAGE)
+const dataUrl = `data:image/png;base64,${png.toString('base64')}`
+const started = Date.now()
+const recognised = await call('exact', OCR, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ image: 'data:image/png;base64,AAAA' }),
+  body: JSON.stringify({ image: dataUrl }),
 })
-assert.equal(noEndpoint.status, 400)
-assert.equal(JSON.parse(noEndpoint.body).error, 'endpoint-missing')
-secrets.delete('FORMULA_OCR_API_KEY')
-console.log('ocr route: 405, 415, invalid-image, api-key-missing, endpoint-missing all correct')
+const elapsed = Date.now() - started
+assert.equal(recognised.status, 200, `OCR answered ${recognised.status}: ${recognised.body.slice(0, 300)}`)
+const answer = JSON.parse(recognised.body)
+assert.equal(answer.latex, MODEL_REPLY)
+assert.equal(answer.provider, 'vision-ai')
+assert.equal(answer.model, 'sees-images')
+assert.equal(calls.length, 1, 'exactly one model call')
+assert.equal(calls[0].config.maxTokens, 4096)
+const content = calls[0].options.messages[0].content
+assert.equal(content.length, 2, 'a text instruction and one image')
+assert.equal(content[0].type, 'text')
+assert.ok(content[0].text.includes('LaTeX'))
+assert.equal(content[1].type, 'image')
+const published = stored.get(content[1].attachment.attachmentId)
+assert.ok(published !== undefined, 'the image was published through attachments')
+assert.equal(published.mediaType, 'image/png')
+assert.deepEqual([...published.data], [...png], 'the published bytes are the uploaded bytes')
+assert.ok(!('apiKey' in calls[0].config), 'no credential is involved anywhere')
+console.log(`ocr: ${elapsed}ms -> ${answer.latex}`)
 
-/* A live round trip only when a key and an endpoint are really configured on this
- * machine. OCR_API_KEY / OCR_BASE_URL / OCR_MODEL let CI (or anyone without a DSH
- * profile) opt in explicitly. */
-const yaml = (() => {
-  if (typeof process.env.OCR_API_KEY === 'string' && process.env.OCR_API_KEY.length > 0) return ''
-  try {
-    return readFileSync(join(homedir(), '.dsh', '.credentials.yaml'), 'utf8')
-  } catch {
-    return ''
-  }
-})()
-const liveKey = process.env.OCR_API_KEY ?? /FORMULA_OCR_API_KEY:\s*(\S+)/.exec(yaml)?.[1]
-const liveBaseURL = process.env.OCR_BASE_URL ?? ''
-const liveModel = process.env.OCR_MODEL ?? ''
+/* `NONE` from the model means "no formula", not an error. */
+streamReply = 'NONE'
+const none = JSON.parse((await call('exact', OCR, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ image: dataUrl }),
+})).body)
+assert.equal(none.empty, true)
+assert.equal(none.latex, '')
 
-if (liveKey === undefined || liveBaseURL.length === 0 || liveModel.length === 0) {
-  console.log('ocr live call: skipped (set OCR_API_KEY + OCR_BASE_URL + OCR_MODEL to run it)')
-} else if (SAMPLE_IMAGE === undefined) {
-  console.log('ocr live call: skipped (sample image not found beside the workspace)')
-} else {
-  secrets.set('FORMULA_OCR_API_KEY', liveKey)
-  const png = readFileSync(SAMPLE_IMAGE).toString('base64')
-  const started = Date.now()
-  const live = await call('exact', '/plugins/dsh-formula-editor/ocr', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ image: `data:image/png;base64,${png}` }),
-  })
-  const elapsed = Date.now() - started
-  assert.equal(live.status, 200, `live OCR answered ${live.status}: ${live.body.slice(0, 300)}`)
-  const answer = JSON.parse(live.body)
-  assert.ok(typeof answer.latex === 'string' && answer.latex.length > 0, 'live OCR returned LaTeX')
-  assert.ok(!/\$\$|```/.test(answer.latex), 'live OCR answer carries no delimiters')
-  console.log(`ocr live call: ${elapsed}ms -> ${answer.latex}`)
+/* Fenced and delimited answers are unwrapped. */
+streamReply = '```latex\n\\frac{a}{b}\n```'
+const fenced = JSON.parse((await call('exact', OCR, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ image: dataUrl }),
+})).body)
+assert.equal(fenced.latex, '\\frac{a}{b}')
+
+/* A model-side failure is a 502 that names the model, not a silent empty answer. */
+streamFailure = 'the model fell over'
+const failed = await call('exact', OCR, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ image: dataUrl }),
+})
+assert.equal(failed.status, 502)
+assert.equal(JSON.parse(failed.body).error, 'ocr-failed')
+assert.ok(JSON.parse(failed.body).detail.includes('the model fell over'))
+streamFailure = ''
+streamReply = MODEL_REPLY
+console.log('ocr route: 405, 415, invalid-image, NONE, fenced answer, model failure all correct')
+
+/* A profile without `llm` says so instead of pretending the image was unreadable. */
+const bare = {
+  effect(callback) { const dispose = callback(); return typeof dispose === 'function' ? dispose : () => {} },
+  webServer: ctx.webServer,
+  fiber: { entry: { id: 'bare' } },
+  get(name) { return name === 'connection' ? connection : undefined },
+  logger: { warn() {} },
 }
+Object.defineProperty(bare, 'connection', { value: connection, enumerable: true })
+const bareRoutes = new Map()
+bare.webServer = { register(route) { bareRoutes.set(`${route.kind} ${route.path}`, route); return () => {} } }
+plugin.apply(bare, {})
+const bareOcr = await new Promise((accept) => {
+  const route = bareRoutes.get(`exact ${OCR}`)
+  const req = {
+    method: 'POST',
+    url: OCR,
+    headers: { host: '127.0.0.1:55678', cookie: SESSION_COOKIE, 'content-type': 'application/json' },
+    on(event, listener) {
+      if (event === 'data') listener(Buffer.from(JSON.stringify({ image: dataUrl }), 'utf8'))
+      if (event === 'end') listener()
+    },
+    destroy() {},
+  }
+  const res = {
+    status: 0,
+    body: '',
+    headersSent: false,
+    writeHead(status) { this.status = status; this.headersSent = true },
+    end(chunk) { if (chunk !== undefined) this.body += String(chunk); accept(this) },
+  }
+  route.handler(req, res)
+})
+assert.equal(bareOcr.status, 400)
+assert.equal(JSON.parse(bareOcr.body).error, 'llm-unavailable')
+console.log('ocr route: a profile without llm is reported as llm-unavailable')
 
 console.log('\nHOST OK')

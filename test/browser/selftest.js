@@ -433,11 +433,40 @@
       close() {},
     }
     ReactDOM.createRoot(settingsHost).render(React.createElement(harness.settingsRender, settingsProps))
-    await until(() => document.querySelector('#settings input[type=password]') !== null, 'the settings panel')
-    await until(() => settingsHost.textContent.includes('当前状态'), 'the settings status line')
-    check('settings: password input', document.querySelector('#settings input[type=password]') !== null)
-    check('settings: shows configured state', settingsHost.textContent.includes('已配置'), settingsHost.textContent.slice(0, 120))
-    check('settings: shows endpoint', settingsHost.textContent.includes('vision.example'))
+    await until(() => document.querySelector('#settings select') !== null, 'the settings panel')
+    await until(() => settingsHost.textContent.includes('当前使用'), 'the settings status line')
+    const picker = document.querySelector('#settings select')
+    check('settings: a model picker, not a key field',
+      picker !== null && document.querySelector('#settings input[type=password]') === null,
+      settingsHost.textContent.slice(0, 120))
+    check('settings: offers every vision model plus the automatic choice',
+      picker !== null && picker.options.length === 3,
+      picker === null ? 'no picker' : [...picker.options].map((one) => one.textContent).join(' | '))
+    check('settings: the automatic choice comes first',
+      picker !== null && picker.options[0].textContent.includes('自动'),
+      picker === null ? 'no picker' : picker.options[0]?.textContent)
+    check('settings: names the model in use',
+      settingsHost.textContent.includes('vision-ai') && settingsHost.textContent.includes('sees-images'),
+      settingsHost.textContent.slice(0, 200))
+    check('settings: says no key is needed',
+      settingsHost.textContent.includes('不需要单独填 API Key'),
+      settingsHost.textContent.slice(0, 200))
+
+    /* Picking a model and saving posts that exact route. */
+    if (picker !== null) {
+      picker.value = 'vision-ai\u0000other-vision'
+      picker.dispatchEvent(new Event('change', { bubbles: true }))
+      await until(() => picker.value === 'vision-ai\u0000other-vision', 'the picker to accept a choice')
+      const saveButton = [...settingsHost.querySelectorAll('button')].find((one) => one.textContent === '保存')
+      saveButton.click()
+      await until(() => harness.requests.some((one) => one.path.endsWith('/settings') && one.method === 'POST'), 'the settings POST', 8000)
+      const post = harness.requests.filter((one) => one.path.endsWith('/settings') && one.method === 'POST').at(-1)
+      check('settings: saving posts the chosen route',
+        harness.lastSettingsBody !== null
+        && harness.lastSettingsBody.provider === 'vision-ai'
+        && harness.lastSettingsBody.model === 'other-vision',
+        JSON.stringify(harness.lastSettingsBody ?? post))
+    }
 
     record('summary', checks.every((one) => one.ok), `${checks.filter((one) => one.ok).length}/${checks.length}`)
   } catch (problem) {

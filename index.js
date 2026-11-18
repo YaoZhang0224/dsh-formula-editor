@@ -1,24 +1,32 @@
 /**
  * dsh-formula-editor — host half.
  *
- * Three routes, all under the plugin's own `/plugins/dsh-formula-editor/`
- * prefix so the browser page reaches them with its own session cookie and no CORS:
+ * Two routes, both under the plugin's own `/plugins/dsh-formula-editor/` prefix so the
+ * browser page reaches them with its own session cookie and no CORS:
  *
- *   POST /plugins/dsh-formula-editor/ocr       image -> LaTeX through a vision model
- *   GET|POST /plugins/dsh-formula-editor/settings  read / write the OCR API key
- *   GET  /plugins/dsh-formula-editor/assets/*  the KaTeX font files the preview needs
+ *   POST /plugins/dsh-formula-editor/ocr        image -> LaTeX through a vision model
+ *   GET|POST /plugins/dsh-formula-editor/settings  which model the editor uses
+ *   GET  /plugins/dsh-formula-editor/assets/*   the KaTeX font files the preview needs
  *
- * Every route asks the composition's `connection` service for a rejection before it
- * does anything (`requestRejection`). That is DSH's own Host/Origin fence plus its
+ * Every route asks the composition's `connection` service for a rejection before it does
+ * anything (`requestRejection`). That is DSH's own Host/Origin fence plus its
  * browser-session cookie: it rejects a `Host` that is not loopback or a configured
  * `trustedHosts` authority, a cross-site `sec-fetch-site`, an `Origin` that disagrees
  * with `Host`, and any request without a valid signed cookie. Comparing `Origin` with
  * `Host` alone is not enough — under DNS rebinding both carry the attacker's name.
  *
- * The key lives in the `credentials` seam under `FORMULA_OCR_API_KEY`, and the endpoint
- * and model come from this plugin's own config. Neither has a built-in default: the key
- * is posted to `baseURL` as a Bearer token together with the screenshot, so only the
- * user can say which service both of them belong to.
+ * ## Why there is no API key here
+ *
+ * Recognition runs through DSH's own `llm` service, using a model the user already
+ * configured in this Harness, and the picture is handed over as a normal image
+ * attachment through the `attachments` service. The plugin therefore ships no endpoint,
+ * no key, and no vendor: whatever the user pointed their Harness at is what reads the
+ * image. That is also why nothing here can leak a credential — there is none to leak.
+ *
+ * The route the call uses, in order:
+ *   1. this plugin's own `provider`/`model` config, when both are set;
+ *   2. the Harness's current default model, when it accepts images;
+ *   3. the first model in the provider catalog that accepts images.
  */
 import { promises as fsp } from 'node:fs'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
@@ -36,23 +44,21 @@ const ROUTE_SETTINGS = '/plugins/dsh-formula-editor/settings'
  */
 const ROUTE_ASSETS = '/plugins/dsh-formula-editor/assets'
 
-/** The ref this plugin owns. */
-const KEY_REF = 'FORMULA_OCR_API_KEY'
-
-/**
- * No default endpoint and no default model.
- *
- * Both have to name the service the user's key belongs to, and only the user knows
- * that. A built-in default is not a convenience: the key is sent as a Bearer token
- * to whatever `baseURL` says, together with the screenshot, so a default pointing at
- * one particular vendor sends every unconfigured install's key to that vendor. The
- * plugin asks for the two values instead of guessing them.
- */
-const DEFAULT_BASE_URL = ''
+/** No built-in route: an empty pair means "follow the Harness". */
+const DEFAULT_PROVIDER = ''
 const DEFAULT_MODEL = ''
 
 /** Request bodies above this are refused before parsing. */
 const MAX_BODY_BYTES = 24 * 1024 * 1024
+
+/** Whole-call budget for one recognition, including queueing at the provider. */
+const OCR_TIMEOUT_MS = 120_000
+
+/** Plenty for one formula; a runaway answer is cut off rather than streamed forever. */
+const MAX_OUTPUT_TOKENS = 4096
+
+/** Image media types the `attachments` service accepts. */
+const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
 const MIME = {
   '.woff2': 'font/woff2',
@@ -84,23 +90,23 @@ export const name = 'dsh-formula-editor'
  * Services required before the routes can mount.
  *
  * `connection` is not optional: it carries the only trust fence these routes have, so a
- * profile without it mounts nothing rather than mounting unguarded routes.
+ * profile without it mounts nothing rather than mounting unguarded routes. `llm` and
+ * `attachments` are reached optionally — a profile without them still serves the editor
+ * and says so, instead of failing to load.
  */
 export const inject = ['webServer', 'connection']
 
 /**
- * Plain-object config: `baseURL` / `model` / `apiKeyRef` are the only knobs.
+ * Plain-object config: an optional `provider`/`model` override.
  *
- * `apiKeyRef` defaults to the ref this plugin owns. `baseURL` and `model` default to
- * the empty string on purpose — they name the service the key belongs to, so the user
- * sets them; see {@link DEFAULT_BASE_URL}.
+ * Both default to the empty string, which means "use whatever this Harness is already
+ * pointed at". Setting them pins recognition to one route.
  */
 export const Config = {
   type: 'object',
   dict: {
-    baseURL: { type: 'string', meta: { default: DEFAULT_BASE_URL } },
+    provider: { type: 'string', meta: { default: DEFAULT_PROVIDER } },
     model: { type: 'string', meta: { default: DEFAULT_MODEL } },
-    apiKeyRef: { type: 'string', meta: { default: KEY_REF } },
   },
   meta: { default: {} },
   '~standard': {
@@ -114,9 +120,8 @@ export const Config = {
       }
       return {
         value: {
-          baseURL: pick('baseURL', DEFAULT_BASE_URL),
+          provider: pick('provider', DEFAULT_PROVIDER),
           model: pick('model', DEFAULT_MODEL),
-          apiKeyRef: pick('apiKeyRef', KEY_REF),
         },
       }
     },
@@ -125,34 +130,104 @@ export const Config = {
 
 /** Resolve the settings the routes run with. */
 function settingsOf(config) {
-  const baseURL = typeof config?.baseURL === 'string' && config.baseURL.length > 0 ? config.baseURL : DEFAULT_BASE_URL
-  const model = typeof config?.model === 'string' && config.model.length > 0 ? config.model : DEFAULT_MODEL
-  const apiKeyRef = typeof config?.apiKeyRef === 'string' && config.apiKeyRef.length > 0 ? config.apiKeyRef : KEY_REF
-  return { baseURL: baseURL.replace(/\/+$/u, ''), model, apiKeyRef }
+  const provider = typeof config?.provider === 'string' ? config.provider.trim() : DEFAULT_PROVIDER
+  const model = typeof config?.model === 'string' ? config.model.trim() : DEFAULT_MODEL
+  return { provider, model }
+}
+
+/** Whether a resolved model advertises image input. */
+function supportsImage(info) {
+  const modalities = info?.inputModalities
+  return Array.isArray(modalities) && modalities.includes('image')
 }
 
 /**
- * Read the API key: only the ref this plugin owns.
+ * Every model in the provider catalog that accepts images.
  *
- * It deliberately does not fall back to the profile's other credentials. A key names
- * one service; the request goes to `baseURL`, which is a different value the user sets
- * independently. Borrowing `TONGJI_AI_API_KEY` or `DEEPSEEK_API_KEY` meant that a
- * profile holding only a DeepSeek key would have it sent to whichever endpoint the
- * config named — the user never agreed to that pairing.
- *
- * @returns the key and where it came from, or an empty value when nothing is configured.
+ * A catalog read is metadata only — it never calls the provider — so this is cheap
+ * enough to run on a settings GET.
  */
-async function resolveKey(ctx, apiKeyRef) {
-  const credentials = ctx.get('credentials')
-  if (credentials === undefined) return { value: '', source: 'unavailable' }
+async function listVisionModels(llm) {
+  const found = []
+  let providers
   try {
-    const resolved = await credentials.resolve(apiKeyRef)
-    const value = typeof resolved?.value === 'string' ? resolved.value.trim() : ''
-    if (value.length > 0) return { value, source: resolved.source ?? 'file', ref: apiKeyRef }
+    providers = llm.listProviders()
   } catch {
-    /* a ref outside the grammar has no value to miss */
+    return found
   }
-  return { value: '', source: 'none' }
+  for (const provider of Array.isArray(providers) ? providers : []) {
+    let models
+    try {
+      models = await llm.listModels(provider.id)
+    } catch {
+      continue
+    }
+    for (const model of Array.isArray(models) ? models : []) {
+      if (!supportsImage(model)) continue
+      found.push({
+        provider: provider.id,
+        providerName: typeof provider.name === 'string' ? provider.name : provider.id,
+        model: model.id,
+        name: typeof model.name === 'string' ? model.name : model.id,
+      })
+    }
+  }
+  return found
+}
+
+/**
+ * Choose the model one recognition call runs on.
+ *
+ * An explicit `provider`/`model` pair wins. Otherwise the Harness's current default
+ * model is used when it can see images, and only then does the plugin fall back to the
+ * first image-capable model in the catalog — so a user who picked a text-only model for
+ * chat still gets working OCR, without configuring anything.
+ *
+ * @returns the chosen route plus where it came from, or a reason nothing could be chosen.
+ */
+async function pickRoute(ctx, settings) {
+  const llm = ctx.get('llm')
+  if (llm === undefined || llm === null) return { ok: false, error: 'llm-unavailable' }
+
+  if (settings.provider.length > 0 && settings.model.length > 0) {
+    let info
+    try {
+      info = await llm.resolveModelInfo(settings.provider, settings.model)
+    } catch (error) {
+      return {
+        ok: false,
+        error: 'model-unavailable',
+        provider: settings.provider,
+        model: settings.model,
+        detail: error instanceof Error ? error.message : String(error),
+      }
+    }
+    if (!supportsImage(info)) {
+      return { ok: false, error: 'model-not-vision', provider: settings.provider, model: settings.model }
+    }
+    return { ok: true, provider: settings.provider, model: settings.model, source: 'config' }
+  }
+
+  let current
+  try {
+    current = ctx.get('agentDefaultModel')?.currentSelection?.()
+  } catch {
+    current = undefined
+  }
+  if (current !== undefined && current !== null && typeof current.provider === 'string' && typeof current.model === 'string') {
+    try {
+      const info = await llm.resolveModelInfo(current.provider, current.model)
+      if (supportsImage(info)) {
+        return { ok: true, provider: current.provider, model: current.model, source: 'default' }
+      }
+    } catch {
+      /* a stale default is not an error: the catalog below may still answer */
+    }
+  }
+
+  const candidates = await listVisionModels(llm)
+  if (candidates.length === 0) return { ok: false, error: 'no-vision-model' }
+  return { ok: true, provider: candidates[0].provider, model: candidates[0].model, source: 'auto' }
 }
 
 /**
@@ -248,54 +323,82 @@ export function cleanLatex(raw) {
   return text
 }
 
-/** Pull the assistant text out of an OpenAI-compatible completion. */
-function completionText(payload) {
-  const message = payload?.choices?.[0]?.message
-  if (message === undefined || message === null) return ''
-  const content = message.content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('')
-  }
-  return ''
+/**
+ * Split a `data:` URL into bytes and its media type.
+ * @returns the decoded image, or undefined when the URL is not an accepted image.
+ */
+export function decodeImageDataUrl(dataUrl) {
+  if (typeof dataUrl !== 'string') return undefined
+  const match = /^data:([a-z0-9.+-]+\/[a-z0-9.+-]+);base64,([\s\S]*)$/iu.exec(dataUrl)
+  if (match === null) return undefined
+  const mediaType = match[1].toLowerCase()
+  if (!IMAGE_MEDIA_TYPES.has(mediaType)) return undefined
+  const data = Buffer.from(match[2], 'base64')
+  if (data.length === 0) return undefined
+  return { mediaType, data }
 }
 
 /**
- * Send one image to the vision model and return the LaTeX it reads.
+ * Send one image to the chosen model through the Harness's own LLM service.
+ *
+ * The picture is published as a durable attachment first, so the request carries a
+ * normal image block — exactly what the model would receive if the user had pasted the
+ * same screenshot into a conversation. Only `text-delta` chunks are kept; a reasoning
+ * model's thinking never reaches the LaTeX box.
+ *
  * @returns the cleaned source, or an empty string when the model found no formula.
  */
-async function recognize({ baseURL, model, apiKey, dataUrl }) {
-  const response = await fetch(`${baseURL}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: OCR_PROMPT },
-            { type: 'image_url', image_url: { url: dataUrl } },
-          ],
-        },
-      ],
-    }),
-  })
-  const text = await response.text()
-  if (!response.ok) {
-    throw new Error(`vision model answered ${String(response.status)}: ${text.slice(0, 400)}`)
+async function recognize({ ctx, route, image }) {
+  const llm = ctx.get('llm')
+  const attachments = ctx.get('attachments')
+  if (llm === undefined || llm === null) throw new Error('llm-unavailable')
+  if (attachments === undefined || attachments === null) throw new Error('attachments-unavailable')
+
+  const ref = await attachments.saveImage({ data: image.data, mediaType: image.mediaType, name: 'formula.png' })
+  const signal = AbortSignal.timeout(OCR_TIMEOUT_MS)
+  const prepared = await llm.prepareCall({ provider: route.provider, model: route.model, maxTokens: MAX_OUTPUT_TOKENS }, signal)
+  const messages = [{
+    role: 'user',
+    content: [
+      { type: 'text', text: OCR_PROMPT },
+      { type: 'image', attachment: ref },
+    ],
+  }]
+  let answer = ''
+  let failure = ''
+  for await (const chunk of prepared.stream({ ...prepared.config, messages, signal })) {
+    if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') {
+      answer += chunk.text
+      continue
+    }
+    if (chunk?.type === 'finish' && chunk.reason?.kind === 'error') {
+      failure = chunk.reason.failure?.message ?? 'model-error'
+    }
+    if (chunk?.type === 'finish' && chunk.reason?.kind === 'aborted') {
+      failure = chunk.reason.failure?.message ?? 'aborted'
+    }
   }
-  let payload
+  if (failure.length > 0) throw new Error(failure)
+  return cleanLatex(answer)
+}
+
+/**
+ * Persist a chosen route into this plugin's own config.
+ *
+ * `configEditor` writes the profile layer, which is the same place the user would edit
+ * by hand; when it is absent (a read-only profile) the choice still applies for the rest
+ * of the session because the route is re-read from the returned settings.
+ */
+async function saveRoute(ctx, next) {
+  const editor = ctx.get('configEditor')
+  const entry = ctx.fiber?.entry
+  if (editor === undefined || editor === null || entry === undefined) return false
   try {
-    payload = JSON.parse(text)
+    await editor.edit(entry, (current) => ({ ...current, provider: next.provider, model: next.model }))
+    return true
   } catch {
-    throw new Error(`vision model returned non-JSON: ${text.slice(0, 200)}`)
+    return false
   }
-  return cleanLatex(completionText(payload))
 }
 
 /** Answer one asset request out of the package's own `assets/` directory. */
@@ -344,7 +447,7 @@ async function serveAsset(req, res, pathname) {
 
 /**
  * Mount the plugin's three routes.
- * @param ctx - plugin context carrying `webServer` (and, when present, `credentials`).
+ * @param ctx - plugin context carrying `webServer`, `connection`, `llm`, `attachments`.
  * @param config - validated {@link Config}.
  */
 export function apply(ctx, config) {
@@ -365,37 +468,35 @@ export function apply(ctx, config) {
             json(res, error instanceof Error && error.message === 'request-too-large' ? 413 : 400, { error: 'invalid-request' })
             return
           }
-          const dataUrl = typeof body?.image === 'string' ? body.image : ''
-          if (!/^data:image\/[a-z0-9.+-]+;base64,/iu.test(dataUrl)) {
+          const image = decodeImageDataUrl(typeof body?.image === 'string' ? body.image : '')
+          if (image === undefined) {
             json(res, 400, { error: 'invalid-image' })
             return
           }
-          const key = await resolveKey(ctx, settings.apiKeyRef)
-          if (key.value.length === 0) {
-            json(res, 400, { error: 'api-key-missing', detail: 'Set the OCR API key in this plugin’s settings.' })
-            return
-          }
-          if (settings.baseURL.length === 0 || settings.model.length === 0) {
-            json(res, 400, {
-              error: 'endpoint-missing',
-              detail: 'Set the vision endpoint and model in this plugin’s settings: the key is sent to that endpoint, so the plugin does not pick one for you.',
-            })
+          const route = await pickRoute(ctx, settingsOf(config))
+          if (route.ok !== true) {
+            const detail = route.error === 'no-vision-model'
+              ? '这台 DSH 里没有任何能看图的模型，请先在设置里配一个支持图片输入的模型。'
+              : route.error === 'llm-unavailable'
+                ? '当前 DSH 没有提供 llm 服务，无法识别图片。'
+                : route.detail ?? ''
+            json(res, 400, { error: route.error, detail, provider: route.provider ?? '', model: route.model ?? '' })
             return
           }
           try {
-            const latex = await recognize({
-              baseURL: settings.baseURL,
-              model: settings.model,
-              apiKey: key.value,
-              dataUrl,
-            })
+            const latex = await recognize({ ctx, route, image })
             if (latex.length === 0) {
-              json(res, 200, { latex: '', empty: true })
+              json(res, 200, { latex: '', empty: true, provider: route.provider, model: route.model })
               return
             }
-            json(res, 200, { latex })
+            json(res, 200, { latex, provider: route.provider, model: route.model })
           } catch (error) {
-            json(res, 502, { error: 'ocr-failed', detail: error instanceof Error ? error.message : String(error) })
+            json(res, 502, {
+              error: 'ocr-failed',
+              detail: error instanceof Error ? error.message : String(error),
+              provider: route.provider,
+              model: route.model,
+            })
           }
         })()
       },
@@ -410,24 +511,21 @@ export function apply(ctx, config) {
       handler: (req, res) => {
         if (rejectUntrusted(ctx, req, res)) return
         void (async () => {
-          const credentials = ctx.get('credentials')
           if (req.method === 'GET') {
-            const key = await resolveKey(ctx, settings.apiKeyRef)
-            let ownConfigured = false
-            try {
-              ownConfigured = (await credentials?.describe(settings.apiKeyRef))?.configured === true
-            } catch {
-              ownConfigured = false
-            }
+            const current = settingsOf(config)
+            const route = await pickRoute(ctx, current)
+            const llm = ctx.get('llm')
+            const models = llm === undefined || llm === null ? [] : await listVisionModels(llm)
             json(res, 200, {
-              configured: key.value.length > 0,
-              ownConfigured,
-              source: key.source,
-              ref: settings.apiKeyRef,
-              usingRef: key.ref ?? settings.apiKeyRef,
-              baseURL: settings.baseURL,
-              model: settings.model,
-              writable: credentials !== undefined,
+              ok: route.ok === true,
+              error: route.ok === true ? '' : route.error,
+              provider: route.ok === true ? route.provider : current.provider,
+              model: route.ok === true ? route.model : current.model,
+              source: route.ok === true ? route.source : 'none',
+              pinned: current.provider.length > 0 && current.model.length > 0,
+              models,
+              llm: llm !== undefined && llm !== null,
+              writable: ctx.get('configEditor') !== undefined && ctx.fiber?.entry !== undefined,
             })
             return
           }
@@ -439,26 +537,44 @@ export function apply(ctx, config) {
             json(res, 400, { error: 'invalid-request' })
             return
           }
-          if (credentials === undefined) {
-            json(res, 501, { error: 'credentials-unavailable' })
-            return
-          }
-          try {
-            if (body?.clear === true) {
-              await credentials.unset(settings.apiKeyRef)
-            } else {
-              const apiKey = typeof body?.apiKey === 'string' ? body.apiKey.trim() : ''
-              if (apiKey.length === 0) {
-                json(res, 400, { error: 'empty-key' })
-                return
+          /* `{ reset: true }` drops the pin and follows the Harness again. */
+          const next = body?.reset === true
+            ? { provider: '', model: '' }
+            : {
+                provider: typeof body?.provider === 'string' ? body.provider.trim() : '',
+                model: typeof body?.model === 'string' ? body.model.trim() : '',
               }
-              await credentials.set(settings.apiKeyRef, apiKey)
-            }
-          } catch (error) {
-            json(res, 500, { error: 'write-failed', detail: error instanceof Error ? error.message : String(error) })
+          if (next.provider.length === 0 !== (next.model.length === 0)) {
+            json(res, 400, { error: 'incomplete-route' })
             return
           }
-          json(res, 200, { ok: true })
+          if (next.provider.length > 0) {
+            const llm = ctx.get('llm')
+            if (llm === undefined || llm === null) {
+              json(res, 501, { error: 'llm-unavailable' })
+              return
+            }
+            let info
+            try {
+              info = await llm.resolveModelInfo(next.provider, next.model)
+            } catch (error) {
+              json(res, 400, { error: 'model-unavailable', detail: error instanceof Error ? error.message : String(error) })
+              return
+            }
+            if (!supportsImage(info)) {
+              json(res, 400, { error: 'model-not-vision' })
+              return
+            }
+          }
+          const persisted = await saveRoute(ctx, next)
+          const route = await pickRoute(ctx, next)
+          json(res, 200, {
+            ok: route.ok === true,
+            persisted,
+            provider: route.ok === true ? route.provider : '',
+            model: route.ok === true ? route.model : '',
+            source: route.ok === true ? route.source : 'none',
+          })
         })()
       },
     }),

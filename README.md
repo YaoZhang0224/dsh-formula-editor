@@ -10,7 +10,7 @@
 
 ![公式编辑器界面](screenshot.png)
 
-**目录**：[它解决什么问题](#它解决什么问题) · [功能](#功能--features) · [前置要求](#前置要求--requirements) · [安装](#安装--install) · [配置模型](#配置模型--configuration) · [使用](#使用--usage) · [工作原理](#工作原理--how-it-works) · [从源码构建](#从源码构建--build) · [测试](#测试--tests) · [目录结构](#目录结构--project-layout) · [已知限制](#已知限制--known-limitations) · [第三方声明](#第三方声明--third-party-notices) · [License](#license)
+**目录**：[它解决什么问题](#它解决什么问题) · [功能](#功能--features) · [前置要求](#前置要求--requirements) · [安装](#安装--install) · [识别用哪个模型](#识别用哪个模型--which-model) · [使用](#使用--usage) · [工作原理](#工作原理--how-it-works) · [从源码构建](#从源码构建--build) · [测试](#测试--tests) · [目录结构](#目录结构--project-layout) · [已知限制](#已知限制--known-limitations) · [第三方声明](#第三方声明--third-party-notices) · [License](#license)
 
 ---
 
@@ -47,7 +47,7 @@
 ## 前置要求 · Requirements
 
 - **DeepSeek Harness** 任意版本（`package.json` 的 `engines.dsh` 声明为 `*`，不设下限也不设上限）
-- **一个能看图的模型**，用来把图片读成 LaTeX。插件调用的是**你自己**的 OpenAI 兼容接口（`/chat/completions`），不绑定任何厂商——把你已经在用的那个视觉模型指过来就行，**不用为了这个插件单独申请 Key**。插件不带默认接口和默认模型，`baseURL` 与 `model` 必须由你填写；没填时点识别会提示尚未配置，不会向任何地址发请求。见 [配置模型](#配置模型--configuration)
+- **一个能看图的模型**，用来把图片读成 LaTeX。**装完就能用**：插件直接用你 DSH 里已经配好的模型和 Key，不需要单独填接口、填 Key、申请账号。默认跟随 DSH 当前的默认模型，也可以在插件设置里固定成别的。见 [识别用哪个模型](#识别用哪个模型--which-model)
 - 右侧边栏 Tab 需要 `dsh-better-sidebar`；**没有它插件照样能用**，只是少了右侧 Tab 和设置面板，左侧整页入口不受影响
 
 ---
@@ -110,53 +110,42 @@ plugin_manager remove_bundle({ target: 'dsh-formula-editor' })
 
 ---
 
-## 配置模型 · Configuration
+## 识别用哪个模型 · Which model
 
-图片识别就是一次普通的 OpenAI 兼容 `/chat/completions` 调用，图片以 `image_url`（data URL）传过去。**用你自己已经在用的那个视觉模型就行**——你手上哪家有能看图的模型、有 Key，就用哪家，插件不绑定任何厂商，也不需要为了它单独申请账号。
+**装完即用，不需要配置。** 插件不自己发 HTTP 请求、不自己管 Key、不绑定任何厂商：它通过 DSH 的 `llm` 服务发起一次普通的模型调用，用的是**你在 DSH 里已经配好的模型和凭据**。你在聊天里能用的那个视觉模型，这里就能用；你的 Key 存在 DSH 的凭据系统里，插件只借用这次调用，读不到也不保存它的值。
 
-要配的只有两件事：**接口地址 + 模型名**，以及**那把 Key**。
+### 怎么选模型
 
-> **插件没有默认接口，也没有默认模型。** 这两个值必须写成你自己那家服务，因为它们决定了 Key 和截图发往哪里——只有你知道自己的 Key 属于哪个服务。留空时点识别会直接提示「尚未配置视觉模型接口」，不会向任何地址发请求。
+按顺序找，第一个能用的就停：
 
-### 接口与模型
+1. **你在插件设置里固定过的模型** —— 见下节，优先级最高
+2. **DSH 当前的默认模型** —— 就是聊天用的那个，如果它接受图片输入
+3. **DSH 里第一个能看图的模型** —— 默认模型是纯文本时自动往后找
 
-插件有三个 `Config` 字段，在 profile 的 `cordis.patch.yml` 里覆盖：
+判断「能不能看图」用的是 DSH 自己报的 `inputModalities`，不是插件猜的。所以你在 DSH 设置里换了模型、加了 provider，插件这边不用改任何东西。
 
-```yaml
-- id: dsh-formula-editor
-  config:
-    baseURL: 'https://your-endpoint.example/v1'   # 任何 OpenAI 兼容的 /v1，必填
-    model: 'your-vision-model'                    # 必须支持图片输入，必填
-    apiKeyRef: 'FORMULA_OCR_API_KEY'              # 下面说的凭据名
-```
+### 固定用某个模型
 
-改完 `Ctrl+R` 刷新页面即可生效（Loader 会热重载这一条）。
+「设置 → 侧边卡片 → 公式编辑器 → 功能设置」里有个下拉框，列出 DSH 里所有**接受图片输入**的模型，选一个保存即可。第一项「自动」是默认状态，即上面的 1→2→3 顺序；点「恢复自动」回到它。
 
-> `baseURL` 只写到接口的 `/v1` 为止，插件自己拼 `/chat/completions`。
-> 挑模型时确认它**支持图片输入**——纯文本模型会把图片丢掉，或者直接报错。
-> 任何 OpenAI 兼容、支持图片输入的服务都能跑，不限于某一家。
+设置面板还会显示**当前实际用的是哪个模型、来源是什么**（本插件指定 / 跟随 DSH 默认 / 自动选中），出问题时先看这一行。
 
-### Key
-
-Key 走 DSH 的凭据系统，两种给法：
-
-1. **在插件设置里填（推荐）** —— 「设置 → 侧边卡片 → 公式编辑器 → 功能设置」，粘贴后保存。值存在 DSH 的凭据存储里，**不会写进插件文件、不会进 git**。
-2. **写进 profile 的凭据文件** —— 在 `~/.dsh/.credentials.yaml` 的 `refs:` 下加一行，名字和上面的 `apiKeyRef` 对应：
-
-```yaml
-refs:
-  FORMULA_OCR_API_KEY: sk-your-key-here
-```
-
-设置面板会显示当前用的是哪把 Key、来自哪里（只显示来源，不显示值）。没配 Key 时点识别会提示「尚未配置 OCR API Key」。
-
-> 如果你本来就在 DSH 里配过某个视觉模型的 Key，可以把 `apiKeyRef` 直接指向那个已有的凭据名，不用再存一份——这是**显式**指定，插件不会自己去借用别的凭据。
+> 固定下来的选择写在 profile 的 `cordis.patch.yml` 里，`Ctrl+R` 刷新后仍生效。也可以手写：
 >
-> 插件只读 `apiKeyRef` 指向的那一个凭据，不会自动回退到 `TONGJI_AI_API_KEY`、`DEEPSEEK_API_KEY` 之类的其它凭据。原因很直接：Key 属于哪个服务只有你知道，而请求是发往 `baseURL` 的；自动借用会把一把属于 A 服务的 Key 发给 B 服务的地址，连截图一起。
+> ```yaml
+> - id: dsh-formula-editor
+>   config:
+>     provider: your-provider-id   # DSH 里 provider 的 id
+>     model: your-vision-model     # 必须支持图片输入
+> ```
+>
+> 两个都留空（默认）就是「自动」。只写一个不生效，会按「自动」处理。
 
-### 换个模型会怎样
+### 没有能看图的模型会怎样
 
-没有额外步骤。改完 `baseURL` / `model` 刷新页面，识别就走新接口。插件只要求对面认 OpenAI 的 `messages` + `image_url` 格式；返回内容从 `choices[0].message.content` 里取，包了 ```` ``` ````、`$$`、`\[` 这类外壳会自动剥掉。
+识别会直接告诉你，不会假装读不出图：提示「这台 DSH 里还没有能看图的模型」。去 DSH 的设置里配一个支持图片输入的模型（任何 OpenAI 兼容、认 `messages` + `image_url` 的服务都行），不用回来改插件。
+
+> 插件用的是 `llm` 服务，所以模型列表和凭据都来自你 DSH 的配置。如果你的 DSH 里一个视觉模型都没有，插件也没法凭空变一个出来——这是唯一需要你动手的情况。
 
 ---
 
@@ -207,11 +196,25 @@ refs:
                               │ 同源 fetch
 ┌──────────────────────── Host (Node) ─────────────────────────────┐
 │  index.js：三条同源路由                                           │
-│    POST /plugins/dsh-formula-editor/ocr       代理视觉模型         │
-│    GET|POST /plugins/dsh-formula-editor/settings  读写 Key         │
+│    POST /plugins/dsh-formula-editor/ocr       借 DSH 的模型读图    │
+│    GET|POST /plugins/dsh-formula-editor/settings  读写模型选择     │
 │    GET  /plugins/dsh-formula-editor/assets/*  KaTeX / MathLive 资产│
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+### 识别为什么不需要 Key
+
+`POST /ocr` 不自己发 HTTP 请求，也不碰凭据，而是调 DSH 的 `llm` 服务：
+
+```js
+const ref = await ctx.attachments.saveImage({ data, mediaType })      // 图片先进附件库
+const call = await ctx.llm.prepareCall({ provider, model, maxTokens }) // 复用已配好的路由
+for await (const chunk of call.stream({ ...call.config, messages })) { /* 收 text-delta */ }
+```
+
+`messages` 里的图片是一个普通的 `{ type: 'image', attachment: ref }` 块，和你在聊天里发截图走的是同一条路——所以 provider 的地址、Key、图片压缩、上下文窗口全由 DSH 负责，插件既不知道也不需要知道 Key 是什么。旧的 `fetch(baseURL + '/chat/completions')` 加 `Authorization: Bearer` 那一套已经整个删掉了。
+
+> 这也意味着：**插件不可能把 Key 发错地方**。路由来自 DSH 的 provider 配置，而不是用户手填的 URL。
 
 ### 转换管线
 
@@ -264,7 +267,7 @@ if (rejection !== undefined) { /* 401 或 403 */ }
 
 `requestRejection` 做两件事：先过 Host/Origin 围栏（`Host` 必须是本机或 `trustedHosts` 里声明过的地址、`sec-fetch-site` 不能是 `cross-site`、有 `Origin` 时必须与 `Host` 一致），再验浏览器会话 cookie。这也正是 `@deepseek-ai/dsh-host-open-in-app` 等 DSH 自带 host 插件的做法。
 
-为什么不自己比较 `Origin === Host`：**DNS 重绑定的时候两个头里都是攻击者的域名**，比出来的结果永远是「一致」。而设置路由能改 `baseURL`、能写 Key，一旦放行，攻击者只要把自己的地址填进去、再触发一次识别，Key 和截图就都发出去了。会话 cookie 这一层也补上了——脚本发起的请求没有 cookie，直接 401。
+为什么不自己比较 `Origin === Host`：**DNS 重绑定的时候两个头里都是攻击者的域名**，比出来的结果永远是「一致」。而设置路由能改插件用哪个 provider / model、OCR 路由会把你的截图交给模型，一旦放行，攻击者只要把自己的地址填成 provider，再触发一次识别，截图就发出去了。会话 cookie 这一层也补上了——脚本发起的请求没有 cookie，直接 401。
 
 `connection` 写在 `inject` 里，所以 profile 里没有这个服务时插件不会挂载路由，而不是挂载一组无人看守的路由。
 
@@ -277,7 +280,7 @@ git clone https://github.com/YaoZhang0224/dsh-formula-editor
 cd dsh-formula-editor
 npm run build        # src/*.js → client.js
 npm run icon         # scripts/icon-source.png → icon.png
-npm run pack         # → dist/dsh-formula-editor-1.0.0.tgz
+npm run pack         # → dist/dsh-formula-editor-1.1.0.tgz
 ```
 
 仓库**没有 npm 依赖**（`dependencies` 与 `devDependencies` 都是空的），所以**不需要 `npm install`**。`client.js` 已内联全部转换模块，`assets/` 与 `vendor/` 都在仓库里，构建和运行都不联网。
@@ -299,7 +302,7 @@ node scripts/fetch-mathlive.mjs ./package
 
 ```bash
 npm test             # Node 侧：转换管线 + 符号数据 + Host 路由 + 搬家测试
-npm run test:browser # 浏览器侧：143 项端到端断言（需要本机有 Chrome 或 Edge）
+npm run test:browser # 浏览器侧：146 项端到端断言（需要本机有 Chrome 或 Edge）
 npm run test:all     # 全部
 ```
 
@@ -307,7 +310,7 @@ npm run test:all     # 全部
 | --- | --- |
 | `scripts/test-convert.mjs` | 12 个公式（重音 / 矩阵 / 积分 / 根式 / cases）走完整转换管线 |
 | `scripts/test-symbols.mjs` | 272 个符号逐项过 temml，10 种样式，`splitInsert` 契约 |
-| `scripts/test-host.mjs` | 三条 Host 路由的状态码与错误分支；`connection` 围栏的 401/403 分支；有 Key 时跑一次真实 OCR |
+| `scripts/test-host.mjs` | 三条 Host 路由的状态码与错误分支；`connection` 围栏的 401/403 分支；用 stub 的 `llm`/`attachments` 跑完整识别，不需要 Key 也不联网 |
 | `scripts/test-relocate.mjs` | 把插件复制到**带空格**的新路径，断言仍能 import、资产齐全、无绝对路径残留 |
 | `test/browser/run.mjs` | 无头 Chrome 跑真实 React 组件：注册元数据、两个菜单的标签与剪贴板输出、Word 剪贴板 payload、MathLive 双向同步、11 个符号图库逐项渲染、撤销重做、导航图标网格 |
 
@@ -350,7 +353,7 @@ dsh-formula-editor/
 ├── vendor/                  上游 LICENSE 留档（运行时不从这里取代码）
 ├── scripts/                 构建、打包、图标生成、Node 侧测试
 └── test/
-    ├── fixtures/formula.png 真实 OCR 样例（供 test-host.mjs 跑联网检查）
+    ├── fixtures/formula.png 真实公式截图（浏览器自测的拖拽素材）
     └── browser/             浏览器端测试：静态服务器 + 自测页 + 驱动脚本 + React
 ```
 
@@ -361,7 +364,7 @@ dsh-formula-editor/
 ## 已知限制 · Known limitations
 
 - **AsciiMath 用函数式 `frac(a)(b)` 记法**，不是 `a/b`。这是 AsciiMath 的标准写法之一，MathJax 的 AsciiMath 解析器两种都接受。
-- **OCR 依赖外部视觉模型 API**，需要网络与有效 Key。
+- **OCR 需要 DSH 里有一个能看图的模型**（网络与 Key 由 DSH 那边的 provider 负责）。
 - **公式域内输入会触发 MathLive 的 inlineShortcuts**：打 `alpha` 会自动变 α、`sqrt` 变根号。这是 MathLive 的默认行为，想关掉可以设 `MathfieldElement.inlineShortcuts = {}`。
 - **Word 2007 以前的版本**不支持 MathML → OMath 转换。
 - **左侧入口的位次是 `order: 40`**，排在「技能中心」之后。要让位次变化，改 `src/client-ui.js` 里注册 `sidebar.panellist` 时的 `order` 再 `npm run build`。装上别的插件后位次可能撞车，此时改 `order` 即可——DSH 内置的几个入口通常占用 0、1、4、10、30 附近。

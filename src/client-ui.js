@@ -285,12 +285,15 @@ const CSS = `
 .dsffe-hint { font-size:11.5px; color:var(--dsw-alias-label-secondary); line-height:1.5; }
 .dsffe-settings { display:flex; flex-direction:column; gap:10px; padding:4px 0; font-size:13px;
   color:var(--dsw-alias-label-primary); }
-.dsffe-settings input[type=password], .dsffe-settings input[type=text] { width:100%;
-  box-sizing:border-box; padding:6px 9px; border-radius:7px;
-  border:1px solid var(--dsw-alias-border-l1); background:var(--dsw-alias-bg-layer-1);
-  color:var(--dsw-alias-label-primary); font-family:ui-monospace, Menlo, Consolas, monospace;
-  font-size:12px; outline:none; }
-.dsffe-settings input:focus { border-color:var(--dsw-alias-brand-primary); }
+.dsffe-settings input[type=password], .dsffe-settings input[type=text],
+.dsffe-settings select { width:100%; box-sizing:border-box; padding:6px 9px;
+  border-radius:7px; border:1px solid var(--dsw-alias-border-l1);
+  background:var(--dsw-alias-bg-layer-1); color:var(--dsw-alias-label-primary);
+  font-family:inherit; font-size:12px; outline:none; }
+.dsffe-settings input:focus, .dsffe-settings select:focus {
+  border-color:var(--dsw-alias-brand-primary); }
+.dsffe-settings select:disabled { opacity:.6; }
+.dsffe-warn { color:var(--dsw-alias-label-warning, #b26a00); }
 .dsffe-page { height:100%; min-height:0; overflow:auto; box-sizing:border-box;
   padding:28px 24px; display:flex; justify-content:center; align-items:flex-start;
   background:var(--dsw-alias-bg-base); }
@@ -949,11 +952,17 @@ function FormulaEditor(props) {
       const payload = await response.json().catch(() => ({}))
       if (!response.ok) {
         const detail = typeof payload.detail === 'string' ? payload.detail : ''
-        if (payload.error === 'api-key-missing') {
-          throw new Error('尚未配置 OCR API Key：请在「设置 → 侧边卡片 → 公式编辑器」里填写。')
+        if (payload.error === 'no-vision-model') {
+          throw new Error('这台 DSH 里还没有能看图的模型：请在「设置 → 模型」里选一个支持图片输入的模型，识别就能直接用。')
         }
-        if (payload.error === 'endpoint-missing') {
-          throw new Error('尚未配置视觉模型接口：请在 profile 的 cordis.patch.yml 里给本插件设置 baseURL 和 model。')
+        if (payload.error === 'model-not-vision') {
+          throw new Error(`当前模型（${payload.provider ?? ''} / ${payload.model ?? ''}）不接受图片输入，请换一个能看图的模型。`)
+        }
+        if (payload.error === 'model-unavailable') {
+          throw new Error(`找不到模型 ${payload.provider ?? ''} / ${payload.model ?? ''}，请重新选择。`)
+        }
+        if (payload.error === 'llm-unavailable') {
+          throw new Error('当前 DSH 没有提供模型服务（llm），无法识别图片。')
         }
         throw new Error(detail.length > 0 ? detail : `识别失败（HTTP ${response.status}）`)
       }
@@ -1264,14 +1273,24 @@ function FormulaPage() {
       h(FormulaEditor, { visible: true })))
 }
 
-/** The API-key panel shown on the sidebar's settings page. */
-function FormulaSettings(props) {
-  const { pluginSettings, updatePluginSetting } = props
+/* The "follow the Harness" choice carries this value in the picker. It is not a
+ * provider id: an empty pair is how the host reads "no pin". */
+const AUTO_ROUTE = ''
+
+/** Where a chosen route came from, spelled out for the settings panel. */
+const SOURCE_TEXT = {
+  config: '本插件设置里指定的模型',
+  default: '跟随 DSH 当前的默认模型',
+  auto: '自动选中的第一个能看图的模型',
+  none: '还没有可用的模型',
+}
+
+/** The model picker shown on the sidebar's settings page. */
+function FormulaSettings() {
   const [info, setInfo] = React.useState(null)
-  const [draft, setDraft] = React.useState('')
+  const [choice, setChoice] = React.useState(AUTO_ROUTE)
   const [status, setStatus] = React.useState('')
   const [busy, setBusy] = React.useState(false)
-  const stored = typeof pluginSettings?.apiKeyDraft === 'string' ? pluginSettings.apiKeyDraft : ''
 
   const refresh = React.useCallback(async () => {
     try {
@@ -1293,33 +1312,33 @@ function FormulaSettings(props) {
         return
       }
       setInfo(payload)
+      setChoice(payload.pinned === true ? `${payload.provider}\u0000${payload.model}` : AUTO_ROUTE)
     } catch (problem) {
       setStatus(`读取设置失败：${problem.message}`)
     }
   }, [])
 
   React.useEffect(() => { void refresh() }, [refresh])
-  React.useEffect(() => { if (stored.length > 0) setDraft(stored) }, [stored])
 
-  const save = async () => {
-    const value = draft.trim()
-    if (value.length === 0) {
-      setStatus('请先填入 API Key')
-      return
-    }
+  const save = async (next) => {
     setBusy(true)
     setStatus('')
     try {
       const response = await fetch(ROUTE_SETTINGS, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ apiKey: value }),
+        body: JSON.stringify(next),
       })
       const payload = await response.json().catch(() => ({}))
-      if (!response.ok) throw new Error(payload.detail ?? payload.error ?? `HTTP ${response.status}`)
-      updatePluginSetting?.('apiKeyDraft', '')
-      setDraft('')
-      setStatus('已保存')
+      if (!response.ok) {
+        const reason = payload.error === 'model-not-vision'
+          ? '这个模型不接受图片输入，换一个能看图的。'
+          : payload.error === 'model-unavailable'
+            ? 'DSH 里找不到这个模型了，请重新选。'
+            : payload.detail ?? payload.error ?? `HTTP ${response.status}`
+        throw new Error(reason)
+      }
+      setStatus(payload.persisted === true ? '已保存' : '已生效（本次运行）')
       await refresh()
     } catch (problem) {
       setStatus(`保存失败：${problem.message}`)
@@ -1328,52 +1347,50 @@ function FormulaSettings(props) {
     }
   }
 
-  const clear = async () => {
-    setBusy(true)
-    setStatus('')
-    try {
-      const response = await fetch(ROUTE_SETTINGS, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ clear: true }),
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      updatePluginSetting?.('apiKeyDraft', '')
-      setDraft('')
-      setStatus('已清除插件自己的 Key')
-      await refresh()
-    } catch (problem) {
-      setStatus(`清除失败：${problem.message}`)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const configured = info?.configured === true
-  const source = typeof info?.source === 'string' ? info.source : ''
-  const usingRef = typeof info?.usingRef === 'string' ? info.usingRef : ''
+  const models = Array.isArray(info?.models) ? info.models : []
+  const activeProvider = typeof info?.provider === 'string' ? info.provider : ''
+  const activeModel = typeof info?.model === 'string' ? info.model : ''
+  const source = typeof info?.source === 'string' ? info.source : 'none'
 
   return h('div', { className: 'dsffe-settings' },
     h('div', { className: 'dsffe-hint' },
-      '公式图片识别使用可配置的视觉大模型。Key 保存在本机凭据存储中，不会写进插件文件。'),
-    h('div', null,
-      h('div', { className: 'dsffe-label' }, h('span', null, 'OCR API Key')),
-      h('input', {
-        type: 'password',
-        value: draft,
-        placeholder: configured ? '已配置（留空则保持不变）' : 'sk-...',
-        spellCheck: false,
-        onChange: (event) => { setDraft(event.target.value) },
-      })),
-    h('div', { className: 'dsffe-row' },
-      h('button', { type: 'button', className: 'dsffe-btn dsffe-primary', disabled: busy, onClick: () => { void save() } }, '保存'),
-      h('button', { type: 'button', className: 'dsffe-btn', disabled: busy || info?.ownConfigured !== true, onClick: () => { void clear() } }, '清除')),
+      '识别图片用的是 DSH 里已经配好的模型，不需要单独填 API Key。默认跟随 DSH 当前的模型；想固定用别的，在这里选一个。'),
+    models.length === 0
+      ? h('div', { className: 'dsffe-hint dsffe-warn' },
+          '没有找到能看图的模型。请先在 DSH 的设置里配置一个支持图片输入的模型，识别才能用。')
+      : h('div', null,
+          h('div', { className: 'dsffe-label' }, h('span', null, '识别用的模型')),
+          h('select', {
+            value: choice,
+            disabled: busy,
+            onChange: (event) => { setChoice(event.target.value) },
+          },
+            h('option', { value: AUTO_ROUTE }, '自动（跟随 DSH 当前模型）'),
+            models.map((entry) => h('option', {
+              key: `${entry.provider}\u0000${entry.model}`,
+              value: `${entry.provider}\u0000${entry.model}`,
+            }, `${entry.providerName} · ${entry.name}`)))),
+    models.length === 0 ? null : h('div', { className: 'dsffe-row' },
+      h('button', {
+        type: 'button',
+        className: 'dsffe-btn dsffe-primary',
+        disabled: busy,
+        onClick: () => {
+          if (choice === AUTO_ROUTE) { void save({ reset: true }); return }
+          const [provider, model] = choice.split('\u0000')
+          void save({ provider, model })
+        },
+      }, '保存'),
+      h('button', {
+        type: 'button',
+        className: 'dsffe-btn',
+        disabled: busy || info?.pinned !== true,
+        onClick: () => { void save({ reset: true }) },
+      }, '恢复自动')),
     h('div', { className: 'dsffe-hint' },
-      configured
-        ? `当前状态：已配置（来源 ${source}${usingRef.length > 0 ? `，${usingRef}` : ''}）`
-        : '当前状态：未配置，图片识别会提示缺少 Key'),
-    h('div', { className: 'dsffe-hint' },
-      `接口：${info?.baseURL ? info.baseURL : '未设置'} · 模型：${info?.model ? info.model : '未设置'}`),
+      info?.ok === true
+        ? `当前使用：${activeProvider} · ${activeModel}（${SOURCE_TEXT[source] ?? source}）`
+        : '当前状态：还没有可用的识别模型'),
     status.length > 0 ? h('div', { className: 'dsffe-hint' }, status) : null,
   )
 }
@@ -1431,7 +1448,7 @@ function apply(ctx) {
     description: () => '图片识别公式、可编辑公式域，复制为 Word 原生公式',
     order: 40,
     single: true,
-    icon: h('span', { style: { fontSize: '15px', lineHeight: 1 }, 'aria-hidden': 'true' }, '\u2211'),
+    icon: h(PanelGlyph, { size: 16 }),
     component: (props) => h(FormulaEditor, props),
     settings: {
       render: (props) => h(FormulaSettings, props),
