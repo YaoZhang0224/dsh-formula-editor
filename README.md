@@ -70,7 +70,7 @@ plugin_manager install_bundle({
 dsh: connection to github.com timed out after 5000ms
 ```
 
-安装因此直接中止，跟插件本身无关。`.tgz` 地址走的是普通 HTTPS 下载，`parseInstallSpec` 把它判成 `tarball` 而不是 `git`，**那次 5 秒探测根本不会执行**。这个包就是本仓库 `HEAD` 打出来的那一份：`git archive HEAD` → `npm pack` 得到同样的 43 个文件、同样 850,672 字节、逐文件 SHA-256 相同。
+安装因此直接中止，跟插件本身无关。`.tgz` 地址走的是普通 HTTPS 下载，`parseInstallSpec` 把它判成 `tarball` 而不是 `git`，**那次 5 秒探测根本不会执行**。这个包就是本仓库对应 tag 打出来的那一份：`git archive` → `npm pack` 得到同样的 43 个文件、逐文件 SHA-256 相同。
 
 ### 方式二：直接从 GitHub 源码装
 
