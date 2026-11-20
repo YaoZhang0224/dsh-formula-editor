@@ -54,9 +54,27 @@
 
 ## 安装 · Install
 
-### 方式一：直接从 GitHub 装（推荐）
+### 方式一：装 Release 里的预构建包（推荐）
 
 在 DSH 会话里让 Agent 执行：
+
+```
+plugin_manager install_bundle({
+  target: 'https://github.com/YaoZhang0224/dsh-formula-editor/releases/download/v1.1.1/dsh-formula-editor-1.1.1.tgz'
+})
+```
+
+**为什么推荐这个而不是 `github:`**：从仓库地址装，插件管理器会先用 `git ls-remote` 探一次连通性，而这次探测的**超时上限是写死的 5000ms**（`dsh-plugin-manager` 的 `githubConnectionTimeoutMs` 默认值）。网络到 GitHub 稍慢一点就会看到：
+
+```
+dsh: connection to github.com timed out after 5000ms
+```
+
+安装因此直接中止，跟插件本身无关。`.tgz` 地址走的是普通 HTTPS 下载，`parseInstallSpec` 把它判成 `tarball` 而不是 `git`，**那次 5 秒探测根本不会执行**。这个包就是本仓库 `HEAD` 打出来的那一份：`git archive HEAD` → `npm pack` 得到同样的 43 个文件、同样 850,672 字节、逐文件 SHA-256 相同。
+
+### 方式二：直接从 GitHub 源码装
+
+网络到 GitHub 够快时可以用，装完是源码目录（pnpm 建链接）：
 
 ```
 plugin_manager install_bundle({ target: 'github:YaoZhang0224/dsh-formula-editor' })
@@ -68,7 +86,9 @@ plugin_manager install_bundle({ target: 'github:YaoZhang0224/dsh-formula-editor'
 plugin_manager install_bundle({ target: 'https://github.com/YaoZhang0224/dsh-formula-editor' })
 ```
 
-### 方式二：本地目录
+`client.js` 已提交进仓库，所以这条路**不需要先构建**。但如果遇到上面那个 5 秒超时，换方式一。
+
+### 方式三：本地目录
 
 把仓库 clone 或解压到任意位置（路径必须是**绝对路径**），然后：
 
@@ -78,18 +98,18 @@ plugin_manager install_bundle({ target: 'D:\\tools\\dsh-formula-editor' })
 
 这种装法建的是目录链接（junction），好处是以后改源码立刻生效，坏处是**那个目录不能删也不能移动**。
 
-### 方式三：`.tgz` 压缩包
+### 方式四：自己打一个 `.tgz`
 
 ```bash
 git clone https://github.com/YaoZhang0224/dsh-formula-editor
 cd dsh-formula-editor
-npm run pack     # → dist/dsh-formula-editor-1.0.0.tgz
+npm run pack     # → dist/dsh-formula-editor-1.1.1.tgz
 ```
 
 把 `.tgz` 发给别人，对方：
 
 ```
-plugin_manager install_bundle({ target: 'C:\\Users\\me\\Downloads\\dsh-formula-editor-1.0.0.tgz' })
+plugin_manager install_bundle({ target: 'C:\\Users\\me\\Downloads\\dsh-formula-editor-1.1.1.tgz' })
 ```
 
 也支持 HTTP 地址。
@@ -280,7 +300,7 @@ git clone https://github.com/YaoZhang0224/dsh-formula-editor
 cd dsh-formula-editor
 npm run build        # src/*.js → client.js
 npm run icon         # scripts/icon-source.png → icon.png
-npm run pack         # → dist/dsh-formula-editor-1.1.0.tgz
+npm run pack         # → dist/dsh-formula-editor-1.1.1.tgz
 ```
 
 仓库**没有 npm 依赖**（`dependencies` 与 `devDependencies` 都是空的），所以**不需要 `npm install`**。`client.js` 已内联全部转换模块，`assets/` 与 `vendor/` 都在仓库里，构建和运行都不联网。
