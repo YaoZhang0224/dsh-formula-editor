@@ -2409,8 +2409,6 @@ function FormulaEditor(props) {
 
     h('div', { className: `dsffe-status${statusKind === 'good' ? ' dsffe-good' : statusKind === 'bad' ? ' dsffe-bad' : ''}` }, status),
     error.length > 0 ? h('div', { className: 'dsffe-err' }, error) : null,
-    h('div', { className: 'dsffe-hint' },
-      '「复制MathML(Word)」写入的是 MathML 富文本，Word 粘贴时会自行转成原生公式，双击即可编辑；「导出Docx」生成的 .docx 里嵌入的是 OMML。'),
   )
 }
 

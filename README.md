@@ -60,7 +60,7 @@
 
 ```
 plugin_manager install_bundle({
-  target: 'https://github.com/YaoZhang0224/dsh-formula-editor/releases/download/v1.1.1/dsh-formula-editor-1.1.1.tgz'
+  target: 'https://github.com/YaoZhang0224/dsh-formula-editor/releases/download/v1.1.2/dsh-formula-editor-1.1.2.tgz'
 })
 ```
 
@@ -103,13 +103,13 @@ plugin_manager install_bundle({ target: 'D:\\tools\\dsh-formula-editor' })
 ```bash
 git clone https://github.com/YaoZhang0224/dsh-formula-editor
 cd dsh-formula-editor
-npm run pack     # → dist/dsh-formula-editor-1.1.1.tgz
+npm run pack     # → dist/dsh-formula-editor-1.1.2.tgz
 ```
 
 把 `.tgz` 发给别人，对方：
 
 ```
-plugin_manager install_bundle({ target: 'C:\\Users\\me\\Downloads\\dsh-formula-editor-1.1.1.tgz' })
+plugin_manager install_bundle({ target: 'C:\\Users\\me\\Downloads\\dsh-formula-editor-1.1.2.tgz' })
 ```
 
 也支持 HTTP 地址。
@@ -300,7 +300,7 @@ git clone https://github.com/YaoZhang0224/dsh-formula-editor
 cd dsh-formula-editor
 npm run build        # src/*.js → client.js
 npm run icon         # scripts/icon-source.png → icon.png
-npm run pack         # → dist/dsh-formula-editor-1.1.1.tgz
+npm run pack         # → dist/dsh-formula-editor-1.1.2.tgz
 ```
 
 仓库**没有 npm 依赖**（`dependencies` 与 `devDependencies` 都是空的），所以**不需要 `npm install`**。`client.js` 已内联全部转换模块，`assets/` 与 `vendor/` 都在仓库里，构建和运行都不联网。
